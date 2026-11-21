@@ -1,6 +1,7 @@
 //! Facts about a process that never change during its life, resolved once and cached.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::fs::{self, File};
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
@@ -17,16 +18,32 @@ const CMDLINE_FILE: &str = "cmdline";
 const CGROUP_FILE: &str = "cgroup";
 const EXE_LINK: &str = "exe";
 const MAX_CMDLINE_BYTES: u64 = 4_096;
+const REDACTED: &str = "<redacted>";
 const DELETED_SUFFIX: &str = " (deleted)";
 const ARGUMENT_SEPARATOR: u8 = 0;
 
 /// Owner, unit, package and command line of a process.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` hides the command line: arguments often carry passwords, tokens and personal data,
+/// and must not reach logs by accident.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProcessStatics {
     user: Box<str>,
     unit: Box<str>,
     package: Box<str>,
     command: Box<str>,
+}
+
+impl fmt::Debug for ProcessStatics {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProcessStatics")
+            .field("user", &self.user)
+            .field("unit", &self.unit)
+            .field("package", &self.package)
+            .field("command", &REDACTED)
+            .finish()
+    }
 }
 
 impl ProcessStatics {
@@ -187,6 +204,27 @@ mod tests {
         assert_eq!(first.command(), "/usr/bin/sshd -D -e");
         assert_eq!(first.package(), NOT_AVAILABLE);
         assert!(Arc::ptr_eq(&first, &second));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn debug_output_hides_the_command_line() {
+        let dir = fixture("redact");
+        fs::write(
+            dir.join(CMDLINE_FILE),
+            b"/usr/bin/tool\0--password=hunter2\0",
+        )
+        .unwrap();
+        let sample = parse_process_stat(STAT).unwrap();
+        let mut resolver = StaticsResolver::new(UserTable::default(), FileOwners::default());
+
+        resolver.begin_scan();
+        let statics = resolver.resolve(&dir, &sample);
+
+        let printed = format!("{statics:?}");
+        assert!(!printed.contains("hunter2"));
+        assert!(printed.contains(REDACTED));
+        assert_eq!(statics.command(), "/usr/bin/tool --password=hunter2");
         fs::remove_dir_all(&dir).unwrap();
     }
 

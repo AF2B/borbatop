@@ -50,7 +50,7 @@ impl PendingConfig {
         &self.files
     }
 
-    /// Directories that could not be read (permissions).
+    /// Directories or entries that could not be read (permissions).
     #[must_use]
     pub const fn unreadable_directories(&self) -> usize {
         self.unreadable_directories
@@ -218,8 +218,11 @@ fn scan_pending_config(root: &Path) -> Reading<PendingConfig> {
         };
         root_checked = true;
 
-        for entry in entries.flatten() {
-            let Ok(kind) = entry.file_type() else {
+        for entry in entries {
+            let Ok((entry, kind)) =
+                entry.and_then(|entry| entry.file_type().map(|kind| (entry, kind)))
+            else {
+                unreadable_directories = unreadable_directories.saturating_add(1);
                 continue;
             };
             let name = entry.file_name();

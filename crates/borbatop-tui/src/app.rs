@@ -1,13 +1,15 @@
 //! Screen state and key handling: no terminal, no drawing, fully testable.
 
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-use borbatop_core::{ActiveState, Pid, UnitRow, order_as_tree};
+use borbatop_core::{ActiveState, Pid, ProcessId, UnitRow, order_as_tree};
 
 use crate::input::{Command, Key, SignalChoice, SortKey, Tab};
 use crate::model::{Model, PacmanView, ProcessRow};
 use crate::theme::ThemeKind;
+use crate::widgets::safe;
 
 const MESSAGE_TTL_TICKS: u8 = 4;
 const PAGE_ROWS: isize = 10;
@@ -101,7 +103,7 @@ pub(crate) struct Message {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SignalDialog {
-    pub(crate) pid: Pid,
+    pub(crate) id: ProcessId,
     pub(crate) command: String,
     pub(crate) selected: usize,
 }
@@ -152,6 +154,8 @@ pub struct App {
     pub(crate) message: Option<Message>,
     pub(crate) pacman: PacmanState,
     pub(crate) scroll: usize,
+    /// Largest useful scroll offset, learned while drawing.
+    pub(crate) max_scroll: Cell<usize>,
 }
 
 impl App {
@@ -188,6 +192,7 @@ impl App {
             message: None,
             pacman: PacmanState::NotRequested,
             scroll: 0,
+            max_scroll: Cell::new(0),
         }
     }
 
@@ -220,8 +225,8 @@ impl App {
     /// * `result` - journal text, or why it could not be read
     pub fn set_logs(&mut self, unit: String, result: Result<String, String>) {
         let (lines, failed) = match result {
-            Ok(text) => (text.lines().map(str::to_owned).collect(), false),
-            Err(reason) => (vec![reason], true),
+            Ok(text) => (text.lines().map(safe).collect(), false),
+            Err(reason) => (vec![safe(&reason)], true),
         };
         self.logs = Some(LogView {
             unit,
@@ -434,7 +439,7 @@ impl App {
             .iter()
             .find(|process| Some(process.pid) == self.selected_pid)?;
         self.dialog = Some(SignalDialog {
-            pid: process.pid,
+            id: ProcessId::new(process.pid, process.start_time),
             command: process.command.clone(),
             selected: 0,
         });
@@ -452,10 +457,10 @@ impl App {
         if key == Key::Escape || key == Key::Char('q') {
             self.dialog = None;
         } else if key == Key::Enter {
-            let pid = dialog.pid;
+            let id = dialog.id;
             let choice = SignalChoice::ALL.get(dialog.selected).copied();
             self.dialog = None;
-            return choice.map(|signal| Command::SendSignal { pid, signal });
+            return choice.map(|signal| Command::SendSignal { id, signal });
         }
         None
     }
@@ -506,7 +511,10 @@ impl App {
             Tab::Processes => self.move_process_selection(delta),
             Tab::Services => self.move_service_selection(delta),
             Tab::Pacman | Tab::Io => {
-                self.scroll = self.scroll.saturating_add_signed(delta);
+                self.scroll = self
+                    .scroll
+                    .saturating_add_signed(delta)
+                    .min(self.max_scroll.get());
             }
         }
         None
@@ -661,6 +669,7 @@ mod tests {
         let sample = borbatop_core::parse_process_stat(&stat).unwrap();
         ProcessRow {
             pid: sample.pid(),
+            start_time: sample.id().start_time(),
             parent: sample.parent(),
             user: "borba".to_owned(),
             state: ProcessState::Sleeping,
@@ -788,7 +797,7 @@ mod tests {
         assert_eq!(
             command,
             Some(Command::SendSignal {
-                pid: Pid::new(7),
+                id: ProcessId::new(Pid::new(7), borbatop_core::StartTime::new(1)),
                 signal: SignalChoice::Kill
             })
         );
@@ -892,6 +901,13 @@ mod tests {
         assert!(app.message.is_some());
         app.tick();
         assert!(app.message.is_none());
+    }
+
+    #[test]
+    fn debug_output_hides_the_command_line_of_a_row() {
+        let printed = format!("{:?}", row(7, 0, 5, "tool --token=s3cr3t"));
+        assert!(!printed.contains("s3cr3t"));
+        assert!(printed.contains("<redacted>"));
     }
 
     #[test]

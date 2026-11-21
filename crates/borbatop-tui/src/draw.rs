@@ -1,6 +1,6 @@
 //! Rendering: turns the [`App`] state into ratatui widgets.
 
-use borbatop_core::{Permille, Pressure, UnitRow};
+use borbatop_core::{ActiveState, Permille, Pressure, UnitRow};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -12,9 +12,9 @@ use crate::app::{
     VisibleRow,
 };
 use crate::input::{SignalChoice, SortKey, Tab};
-use crate::model::{Model, ProcessRow};
+use crate::model::{Model, PacmanView, ProcessRow};
 use crate::theme::Theme;
-use crate::widgets::{Heat, bar_text, fit, fit_right, heat_of, scale_of, sparkline};
+use crate::widgets::{Heat, bar_text, fit, fit_right, heat_of, safe, scale_of, sparkline};
 
 /// The logo: the wordmark followed by an Electric Blue dot.
 pub const WORDMARK: &str = "BORBA";
@@ -34,6 +34,25 @@ const SECONDS_PER_HOUR: u64 = 3_600;
 const SECONDS_PER_DAY: u64 = 86_400;
 const SPARK_RESERVED: usize = 16;
 const NET_SPARK_WIDTH: usize = 30;
+const PID_WIDTH: usize = 7;
+const USER_WIDTH: usize = 10;
+const STATE_WIDTH: usize = 2;
+const CPU_WIDTH: usize = 6;
+const MEMORY_WIDTH: usize = 7;
+const THREADS_WIDTH: usize = 4;
+const UNIT_WIDTH: usize = 26;
+const PACKAGE_WIDTH: usize = 16;
+const SERVICE_NAME_WIDTH: usize = 40;
+const ACTIVE_WIDTH: usize = 12;
+const SUB_WIDTH: usize = 10;
+const MOUNT_WIDTH: usize = 16;
+const FS_TYPE_WIDTH: usize = 6;
+const INTERFACE_WIDTH: usize = 12;
+const RATE_WIDTH: usize = 10;
+const DIALOG_RESERVED: usize = 12;
+const HEADER_INFO_WIDTH: u16 = 48;
+const JOURNAL_MARGIN_X: u16 = 4;
+const JOURNAL_MARGIN_Y: u16 = 2;
 
 struct Styles {
     base: Style,
@@ -142,7 +161,8 @@ fn panel<'a>(title: &str, styles: &Styles) -> Block<'a> {
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
     let [left, right] =
-        Layout::horizontal([Constraint::Min(20), Constraint::Length(48)]).areas(area);
+        Layout::horizontal([Constraint::Min(20), Constraint::Length(HEADER_INFO_WIDTH)])
+            .areas(area);
     let logo = Line::from(vec![
         Span::styled(WORDMARK, styles.strong),
         Span::styled(WORDMARK_DOT, styles.accent.add_modifier(Modifier::BOLD)),
@@ -372,20 +392,27 @@ fn process_header(app: &App, columns: &Columns, styles: &Styles) -> Line<'static
             Span::styled(text, styles.accent)
         }
     };
+    let label = |text: &str, width: usize| Span::styled(fit(text, width), styles.accent);
     let mut spans = vec![
-        title(SortKey::Pid, fit_right("PID", 7)),
-        Span::styled(format!(" {} ", fit("USER", 10)), styles.accent),
-        Span::styled("S ", styles.accent),
-        title(SortKey::Cpu, fit_right("CPU%", 6)),
+        title(SortKey::Pid, fit_right("PID", PID_WIDTH)),
         Span::raw(" "),
-        title(SortKey::Memory, fit_right("MEM", 7)),
-        Span::styled(format!(" {} ", fit_right("THR", 4)), styles.accent),
+        label("USER", USER_WIDTH),
+        Span::raw(" "),
+        label("S", STATE_WIDTH),
+        title(SortKey::Cpu, fit_right("CPU%", CPU_WIDTH)),
+        Span::raw(" "),
+        title(SortKey::Memory, fit_right("MEM", MEMORY_WIDTH)),
+        Span::raw(" "),
+        Span::styled(fit_right("THR", THREADS_WIDTH), styles.accent),
+        Span::raw(" "),
     ];
     if columns.unit {
-        spans.push(Span::styled(format!("{} ", fit("UNIT", 26)), styles.accent));
+        spans.push(label("UNIT", UNIT_WIDTH));
+        spans.push(Span::raw(" "));
     }
     if columns.package {
-        spans.push(Span::styled(format!("{} ", fit("PKG", 16)), styles.accent));
+        spans.push(label("PKG", PACKAGE_WIDTH));
+        spans.push(Span::raw(" "));
     }
     spans.push(title(SortKey::Command, "COMMAND".to_owned()));
     Line::from(spans)
@@ -413,34 +440,40 @@ fn process_line(
     };
 
     let mut cells = vec![
-        (fit_right(&process.pid.to_string(), 7), styles.base),
-        (format!(" {} ", fit(&process.user, 10)), styles.base),
-        (format!("{state} "), state_style),
+        (fit_right(&process.pid.to_string(), PID_WIDTH), styles.base),
+        (format!(" {} ", fit(&process.user, USER_WIDTH)), styles.base),
+        (fit(&state.to_string(), STATE_WIDTH), state_style),
         (
-            fit_right(&process.cpu.to_string(), 6),
+            fit_right(&process.cpu.to_string(), CPU_WIDTH),
             styles.heat(heat_of(process.cpu)),
         ),
         (
-            format!(" {}", fit_right(&process.memory.to_string(), 7)),
+            format!(" {}", fit_right(&process.memory.to_string(), MEMORY_WIDTH)),
             styles.base,
         ),
         (
-            format!(" {} ", fit_right(&process.threads.to_string(), 4)),
+            format!(
+                " {} ",
+                fit_right(&process.threads.to_string(), THREADS_WIDTH)
+            ),
             styles.secondary,
         ),
     ];
     if columns.unit {
-        cells.push((format!("{} ", fit(&process.unit, 26)), styles.secondary));
+        cells.push((
+            format!("{} ", fit(&process.unit, UNIT_WIDTH)),
+            styles.secondary,
+        ));
     }
     if columns.package {
-        cells.push((format!("{} ", fit(&process.package, 16)), styles.accent));
+        cells.push((
+            format!("{} ", fit(&process.package, PACKAGE_WIDTH)),
+            styles.accent,
+        ));
     }
     let used: usize = cells.iter().map(|(text, _)| text.chars().count()).sum();
-    let command_width = width.saturating_sub(used);
-    cells.push((
-        fit(&format!("{indent}{}", process.command), command_width),
-        styles.base,
-    ));
+    let command = format!("{indent}{}", process.command);
+    cells.push((fit(&command, width.saturating_sub(used)), styles.base));
 
     Line::from(
         cells
@@ -504,7 +537,6 @@ fn draw_processes(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
 }
 
 fn unit_line(unit: &UnitRow, selected: bool, styles: &Styles, width: usize) -> Line<'static> {
-    use borbatop_core::ActiveState;
     let (icon, style) = match unit.active() {
         ActiveState::Failed => ("✗", styles.danger),
         ActiveState::Active => ("●", styles.ok),
@@ -516,9 +548,15 @@ fn unit_line(unit: &UnitRow, selected: bool, styles: &Styles, width: usize) -> L
     };
     let cells = [
         (format!("{icon} "), style),
-        (format!("{} ", fit(unit.name(), 40)), styles.base),
-        (format!("{} ", fit(unit.active().name(), 12)), style),
-        (format!("{} ", fit(unit.sub(), 10)), style),
+        (
+            format!("{} ", fit(unit.name(), SERVICE_NAME_WIDTH)),
+            styles.base,
+        ),
+        (
+            format!("{} ", fit(unit.active().name(), ACTIVE_WIDTH)),
+            style,
+        ),
+        (format!("{} ", fit(unit.sub(), SUB_WIDTH)), style),
     ];
     let used: usize = cells.iter().map(|(text, _)| text.chars().count()).sum();
     let description = fit(unit.description(), width.saturating_sub(used));
@@ -551,7 +589,7 @@ fn draw_services(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
     let units = app.visible_units();
     let failed = units
         .iter()
-        .filter(|unit| unit.active() == borbatop_core::ActiveState::Failed)
+        .filter(|unit| unit.active() == ActiveState::Failed)
         .count();
     let block = panel(&format!("{} units · {failed} failed", units.len()), styles);
     let inner = block.inner(area);
@@ -569,9 +607,9 @@ fn draw_services(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
             let mut lines = vec![Line::from(Span::styled(
                 format!(
                     "  {} {} {} DESCRIPTION",
-                    fit("UNIT", 40),
-                    fit("ACTIVE", 12),
-                    fit("SUB", 10)
+                    fit("UNIT", SERVICE_NAME_WIDTH),
+                    fit("ACTIVE", ACTIVE_WIDTH),
+                    fit("SUB", SUB_WIDTH)
                 ),
                 styles.accent,
             ))];
@@ -593,7 +631,15 @@ fn error_line<'a>(label: &str, reason: &str, styles: &Styles) -> Line<'a> {
     Line::styled(format!("  {label}: {reason}"), styles.danger)
 }
 
-fn pacman_lines<'a>(view: &crate::model::PacmanView, styles: &Styles) -> Vec<Line<'a>> {
+fn pacman_lines<'a>(view: &PacmanView, styles: &Styles) -> Vec<Line<'a>> {
+    let mut lines = upgrade_lines(view, styles);
+    lines.extend(kernel_lines(view, styles));
+    lines.extend(cleanup_lines(view, styles));
+    lines.extend(stale_lines(view, styles));
+    lines
+}
+
+fn upgrade_lines<'a>(view: &PacmanView, styles: &Styles) -> Vec<Line<'a>> {
     let mut lines = vec![section("Pending upgrades (synced database)", styles)];
     match &view.upgrades {
         Ok(upgrades) if upgrades.is_empty() => lines.push(Line::styled("  none", styles.ok)),
@@ -601,21 +647,24 @@ fn pacman_lines<'a>(view: &crate::model::PacmanView, styles: &Styles) -> Vec<Lin
             Line::styled(
                 format!(
                     "  {:<32} {} → {}",
-                    upgrade.name(),
-                    upgrade.from(),
-                    upgrade.to()
+                    safe(upgrade.name()),
+                    safe(upgrade.from()),
+                    safe(upgrade.to())
                 ),
                 styles.base,
             )
         })),
         Err(reason) => lines.push(error_line("pacman -Qu", reason, styles)),
     }
+    lines
+}
 
-    lines.push(section("Kernel", styles));
+fn kernel_lines<'a>(view: &PacmanView, styles: &Styles) -> Vec<Line<'a>> {
+    let mut lines = vec![section("Kernel", styles)];
     match &view.kernel {
         Ok(kernel) => {
             lines.push(Line::styled(
-                format!("  running {}", kernel.running),
+                format!("  running {}", safe(&kernel.running)),
                 styles.base,
             ));
             lines.push(if kernel.reboot_recommended {
@@ -629,12 +678,15 @@ fn pacman_lines<'a>(view: &crate::model::PacmanView, styles: &Styles) -> Vec<Lin
         }
         Err(reason) => lines.push(error_line("kernel", reason, styles)),
     }
+    lines
+}
 
-    lines.push(section("Cleanup", styles));
+fn cleanup_lines<'a>(view: &PacmanView, styles: &Styles) -> Vec<Line<'a>> {
+    let mut lines = vec![section("Cleanup", styles)];
     match &view.orphans {
         Ok(orphans) if orphans.is_empty() => lines.push(Line::styled("  no orphans", styles.ok)),
         Ok(orphans) => lines.push(Line::styled(
-            format!("  {} orphans: {}", orphans.len(), orphans.join(", ")),
+            format!("  {} orphans: {}", orphans.len(), safe(&orphans.join(", "))),
             styles.base,
         )),
         Err(reason) => lines.push(error_line("pacman -Qdtq", reason, styles)),
@@ -646,7 +698,7 @@ fn pacman_lines<'a>(view: &crate::model::PacmanView, styles: &Styles) -> Vec<Lin
         Ok(files) => lines.extend(
             files
                 .iter()
-                .map(|file| Line::styled(format!("  {file}"), styles.danger)),
+                .map(|file| Line::styled(format!("  {}", safe(file)), styles.danger)),
         ),
         Err(reason) => lines.push(error_line("/etc", reason, styles)),
     }
@@ -654,14 +706,22 @@ fn pacman_lines<'a>(view: &crate::model::PacmanView, styles: &Styles) -> Vec<Lin
         Ok(size) => lines.push(Line::styled(format!("  package cache {size}"), styles.base)),
         Err(reason) => lines.push(error_line("cache", reason, styles)),
     }
+    lines
+}
 
-    lines.push(section("Processes using replaced libraries", styles));
+fn stale_lines<'a>(view: &PacmanView, styles: &Styles) -> Vec<Line<'a>> {
+    let mut lines = vec![section("Processes using replaced libraries", styles)];
     if view.stale.is_empty() {
         lines.push(Line::styled("  none found", styles.ok));
     }
     lines.extend(view.stale.iter().map(|stale| {
         Line::styled(
-            format!("  {:>7} {:<16} {}", stale.pid, stale.comm, stale.library),
+            format!(
+                "  {:>7} {:<16} {}",
+                stale.pid,
+                safe(&stale.comm),
+                safe(&stale.library)
+            ),
             styles.base,
         )
     }));
@@ -677,10 +737,11 @@ fn pacman_lines<'a>(view: &crate::model::PacmanView, styles: &Styles) -> Vec<Lin
     lines
 }
 
-fn draw_scrolling(frame: &mut Frame, area: Rect, lines: Vec<Line>, scroll: usize, styles: &Styles) {
+fn draw_scrolling(frame: &mut Frame, area: Rect, lines: Vec<Line>, app: &App, styles: &Styles) {
     let height = usize::from(area.height);
-    let top = scroll.min(lines.len().saturating_sub(height));
-    let offset = u16::try_from(top).unwrap_or(u16::MAX);
+    let max_scroll = lines.len().saturating_sub(height);
+    app.max_scroll.set(max_scroll);
+    let offset = u16::try_from(app.scroll.min(max_scroll)).unwrap_or(u16::MAX);
     frame.render_widget(
         Paragraph::new(lines).scroll((offset, 0)).style(styles.base),
         area,
@@ -707,7 +768,7 @@ fn draw_pacman(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
             )]
         }
     };
-    draw_scrolling(frame, inner, lines, app.scroll, styles);
+    draw_scrolling(frame, inner, lines, app, styles);
 }
 
 fn rate_text(rate: Option<borbatop_core::BytesPerSecond>) -> String {
@@ -715,6 +776,13 @@ fn rate_text(rate: Option<borbatop_core::BytesPerSecond>) -> String {
 }
 
 fn io_lines<'a>(model: &Model, width: usize, styles: &Styles) -> Vec<Line<'a>> {
+    let mut lines = network_lines(model, width, styles);
+    lines.extend(disk_lines(model, styles));
+    lines.extend(mount_lines(model, width, styles));
+    lines
+}
+
+fn network_lines<'a>(model: &Model, width: usize, styles: &Styles) -> Vec<Line<'a>> {
     let mut lines = vec![section("Network", styles)];
     let spark_width = width.saturating_sub(40).clamp(8, NET_SPARK_WIDTH);
     for net in &model.network {
@@ -723,43 +791,64 @@ fn io_lines<'a>(model: &Model, width: usize, styles: &Styles) -> Vec<Line<'a>> {
             ("TX", net.sent, &net.sent_history),
         ] {
             lines.push(Line::from(vec![
-                Span::styled(format!("  {:<12} {label} ", net.name), styles.secondary),
+                Span::styled(
+                    format!("  {} {label} ", fit(&net.name, INTERFACE_WIDTH)),
+                    styles.secondary,
+                ),
                 Span::styled(
                     sparkline(history.iter(), scale_of(history.iter()), spark_width),
                     styles.accent,
                 ),
-                Span::styled(format!(" {:>10}", rate_text(rate)), styles.base),
+                Span::styled(
+                    format!(" {}", fit_right(&rate_text(rate), RATE_WIDTH)),
+                    styles.base,
+                ),
             ]));
         }
     }
     if model.network.is_empty() {
         lines.push(Line::styled("  no interface", styles.secondary));
     }
+    lines
+}
 
-    lines.push(section("Disk I/O", styles));
+fn disk_lines<'a>(model: &Model, styles: &Styles) -> Vec<Line<'a>> {
+    let mut lines = vec![section("Disk I/O", styles)];
     lines.extend(model.disks.iter().map(|disk| {
         Line::from(vec![
-            Span::styled(format!("  {:<12} ", disk.name), styles.secondary),
+            Span::styled(
+                format!("  {} ", fit(&disk.name, INTERFACE_WIDTH)),
+                styles.secondary,
+            ),
             Span::styled(
                 format!(
-                    "read {:>10}  write {:>10}",
-                    rate_text(disk.read),
-                    rate_text(disk.written)
+                    "read {}  write {}",
+                    fit_right(&rate_text(disk.read), RATE_WIDTH),
+                    fit_right(&rate_text(disk.written), RATE_WIDTH)
                 ),
                 styles.base,
             ),
         ])
     }));
+    lines
+}
 
-    lines.push(section("Filesystems", styles));
+fn mount_lines<'a>(model: &Model, width: usize, styles: &Styles) -> Vec<Line<'a>> {
+    let mut lines = vec![section("Filesystems", styles)];
     let bar_width = width.saturating_sub(48).clamp(8, 40);
     lines.extend(model.mounts.iter().map(|mount| {
         let share = mount.used.permille_of(mount.total);
         let heat = heat_of(Permille::new(share));
         let (filled, empty) = bar_text(share, bar_width);
         Line::from(vec![
-            Span::styled(format!("  {} ", fit(&mount.mount_point, 16)), styles.base),
-            Span::styled(format!("{} ", fit(&mount.fs_type, 6)), styles.secondary),
+            Span::styled(
+                format!("  {} ", fit(&mount.mount_point, MOUNT_WIDTH)),
+                styles.base,
+            ),
+            Span::styled(
+                format!("{} ", fit(&mount.fs_type, FS_TYPE_WIDTH)),
+                styles.secondary,
+            ),
             Span::styled(filled, styles.bar(heat)),
             Span::styled(empty, styles.border),
             Span::styled(
@@ -776,7 +865,7 @@ fn draw_io(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let lines = io_lines(&app.model, to_width(inner), styles);
-    draw_scrolling(frame, inner, lines, app.scroll, styles);
+    draw_scrolling(frame, inner, lines, app, styles);
 }
 
 fn key_hint<'a>(key: &'static str, text: &'static str, styles: &Styles) -> [Span<'a>; 2] {
@@ -786,55 +875,65 @@ fn key_hint<'a>(key: &'static str, text: &'static str, styles: &Styles) -> [Span
     ]
 }
 
-fn draw_status(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
-    let line = if app.input == InputMode::Filtering {
-        Line::from(vec![
-            Span::styled(format!("/ {}", app.filter), styles.accent),
+fn hints_for(tab: Tab) -> &'static [(&'static str, &'static str)] {
+    match tab {
+        Tab::Processes => &[
+            ("↑↓", "move"),
+            ("s", "sort"),
+            ("r", "reverse"),
+            ("/", "filter"),
+            ("t", "tree"),
+            ("K", "signal"),
+            ("p", "pkg"),
+            ("␣", "pause"),
+            ("q", "quit"),
+        ],
+        Tab::Services => &[
+            ("↑↓", "move"),
+            ("/", "filter"),
+            ("l", "logs"),
+            ("␣", "pause"),
+            ("q", "quit"),
+        ],
+        Tab::Pacman => &[("↑↓", "scroll"), ("R", "refresh"), ("q", "quit")],
+        Tab::Io => &[("↑↓", "scroll"), ("␣", "pause"), ("q", "quit")],
+    }
+}
+
+fn status_line<'a>(app: &App, styles: &Styles) -> Line<'a> {
+    if app.input == InputMode::Filtering {
+        return Line::from(vec![
+            Span::styled(format!("/ {}", safe(&app.filter)), styles.accent),
             Span::styled("█", styles.accent),
             Span::styled("   Enter apply · Esc clear", styles.secondary),
-        ])
-    } else if let Some(message) = &app.message {
+        ]);
+    }
+    if let Some(message) = &app.message {
         let style = match message.kind {
             MessageKind::Info => styles.base,
             MessageKind::Error => styles.danger,
         };
-        Line::styled(message.text.clone(), style)
-    } else {
-        let mut spans: Vec<Span> = Vec::new();
-        let hints: &[(&'static str, &'static str)] = match app.tab {
-            Tab::Processes => &[
-                ("↑↓", "move"),
-                ("s", "sort"),
-                ("r", "reverse"),
-                ("/", "filter"),
-                ("t", "tree"),
-                ("K", "signal"),
-                ("p", "pkg"),
-                ("␣", "pause"),
-                ("q", "quit"),
-            ],
-            Tab::Services => &[
-                ("↑↓", "move"),
-                ("/", "filter"),
-                ("l", "logs"),
-                ("␣", "pause"),
-                ("q", "quit"),
-            ],
-            Tab::Pacman => &[("↑↓", "scroll"), ("R", "refresh"), ("q", "quit")],
-            Tab::Io => &[("↑↓", "scroll"), ("␣", "pause"), ("q", "quit")],
-        };
-        for (key, text) in hints {
-            spans.extend(key_hint(key, text, styles));
-        }
-        if !app.filter.is_empty() {
-            spans.push(Span::styled(
-                format!("  filter: {}", app.filter),
-                styles.accent,
-            ));
-        }
-        Line::from(spans)
-    };
-    frame.render_widget(Paragraph::new(line).style(styles.base), area);
+        return Line::styled(safe(&message.text), style);
+    }
+
+    let mut spans: Vec<Span> = Vec::new();
+    for (key, text) in hints_for(app.tab) {
+        spans.extend(key_hint(key, text, styles));
+    }
+    if !app.filter.is_empty() {
+        spans.push(Span::styled(
+            format!("  filter: {}", safe(&app.filter)),
+            styles.accent,
+        ));
+    }
+    Line::from(spans)
+}
+
+fn draw_status(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
+    frame.render_widget(
+        Paragraph::new(status_line(app, styles)).style(styles.base),
+        area,
+    );
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -860,11 +959,14 @@ fn draw_dialog(frame: &mut Frame, dialog: &SignalDialog, styles: &Styles) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let target = fit(&dialog.command, usize::from(inner.width).saturating_sub(12));
+    let target = fit(
+        &dialog.command,
+        usize::from(inner.width).saturating_sub(DIALOG_RESERVED),
+    );
     let mut lines = vec![
         Line::from(vec![
             Span::styled(target, styles.base),
-            Span::styled(format!(" PID {}", dialog.pid), styles.secondary),
+            Span::styled(format!(" PID {}", dialog.id.pid()), styles.secondary),
         ]),
         Line::raw(""),
     ];
@@ -889,8 +991,8 @@ fn draw_dialog(frame: &mut Frame, dialog: &SignalDialog, styles: &Styles) {
 fn draw_logs(frame: &mut Frame, logs: &LogView, styles: &Styles) {
     let area = centered(
         frame.area(),
-        frame.area().width.saturating_sub(4),
-        frame.area().height.saturating_sub(2),
+        frame.area().width.saturating_sub(JOURNAL_MARGIN_X),
+        frame.area().height.saturating_sub(JOURNAL_MARGIN_Y),
     );
     frame.render_widget(Clear, area);
     let block = Block::bordered()
@@ -941,6 +1043,7 @@ mod tests {
         let sample = borbatop_core::parse_process_stat(&stat).unwrap();
         ProcessRow {
             pid: Pid::new(pid),
+            start_time: sample.id().start_time(),
             parent: Pid::new(parent),
             user: "borba".to_owned(),
             state: ProcessState::Running,
@@ -1219,6 +1322,97 @@ mod tests {
         let mut ansi = App::new(config);
         ansi.apply_model(sample_model());
         assert_eq!(screen(&ansi), screen(&app()));
+    }
+
+    #[test]
+    fn terminal_escape_sequences_in_untrusted_text_never_reach_the_screen() {
+        let evil = "\x1b]0;pwned\x07\x1b[2Jevil";
+        let mut model = sample_model();
+        model.processes.push(row(9, 1, 5, evil));
+        model.processes.push(row(10, 1, 4, "tree-child"));
+        model.network[0].name = evil.to_owned();
+        model.mounts[0].mount_point = evil.to_owned();
+        let mut app = App::new(UiConfig::default());
+        app.apply_model(model);
+
+        let mut terminal = Terminal::new(TestBackend::new(130, 36)).unwrap();
+        for key in ['1', '2', '3', '4'] {
+            app.handle_key(Key::Char(key));
+            if key == '3' {
+                app.set_pacman(PacmanView {
+                    upgrades: Ok(Vec::new()),
+                    orphans: Ok(vec![evil.to_owned()]),
+                    kernel: Ok(KernelView {
+                        running: evil.to_owned(),
+                        reboot_recommended: false,
+                    }),
+                    pending_config: Ok(vec![evil.to_owned()]),
+                    cache: Ok(Bytes::new(1)),
+                    stale: vec![StaleView {
+                        pid: Pid::new(9),
+                        comm: evil.to_owned(),
+                        library: evil.to_owned(),
+                    }],
+                    stale_unreadable: 0,
+                });
+            }
+            terminal.draw(|frame| draw(frame, &app)).unwrap();
+            let clean = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .all(|cell| !cell.symbol().chars().any(char::is_control));
+            assert!(clean, "tab {key} leaked a control character");
+        }
+
+        app.handle_key(Key::Char('2'));
+        app.set_logs("x.service".to_owned(), Ok(format!("{evil}\nnormal line")));
+        app.handle_key(Key::Char('/'));
+        app.handle_key(Key::Char('\x1b'));
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let clean = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .all(|cell| !cell.symbol().chars().any(char::is_control));
+        assert!(clean, "journal or filter leaked a control character");
+    }
+
+    #[test]
+    fn scrolling_clamps_to_the_content_so_the_next_key_moves_at_once() {
+        let mut app = app();
+        app.handle_key(Key::Char('3'));
+        let stale = (0..60)
+            .map(|number| StaleView {
+                pid: Pid::new(number),
+                comm: "proc".to_owned(),
+                library: "/usr/lib/libx.so".to_owned(),
+            })
+            .collect();
+        app.set_pacman(PacmanView {
+            upgrades: Ok(Vec::new()),
+            orphans: Ok(Vec::new()),
+            kernel: Ok(KernelView {
+                running: "7".to_owned(),
+                reboot_recommended: false,
+            }),
+            pending_config: Ok(Vec::new()),
+            cache: Ok(Bytes::new(0)),
+            stale,
+            stale_unreadable: 0,
+        });
+        let _ = render(&app, 80, 20);
+
+        app.handle_key(Key::End);
+        let bottom = app.scroll;
+        assert!(bottom > 0);
+        assert_eq!(bottom, app.max_scroll.get());
+        app.handle_key(Key::Up);
+        assert_eq!(app.scroll, bottom - 1);
+        app.handle_key(Key::Home);
+        assert_eq!(app.scroll, 0);
     }
 
     #[test]

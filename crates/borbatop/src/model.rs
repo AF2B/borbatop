@@ -152,6 +152,7 @@ impl ModelBuilder {
                 let statics = record.statics();
                 ProcessRow {
                     pid: sample.pid(),
+                    start_time: sample.id().start_time(),
                     parent: sample.parent(),
                     user: statics.user().to_owned(),
                     state: sample.state(),

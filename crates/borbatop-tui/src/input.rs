@@ -1,6 +1,6 @@
 //! What the person can press, and what the screen asks the program to do about it.
 
-use borbatop_core::Pid;
+use borbatop_core::ProcessId;
 
 /// A key press, independent of any terminal library.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,8 +172,8 @@ pub enum Command {
     Quit,
     /// Deliver a signal to a process.
     SendSignal {
-        /// Process to signal.
-        pid: Pid,
+        /// Process to signal: PID plus start time, so a reused PID is never hit.
+        id: ProcessId,
         /// Signal to send.
         signal: SignalChoice,
     },

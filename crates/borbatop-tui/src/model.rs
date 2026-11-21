@@ -4,14 +4,18 @@ use std::time::Duration;
 
 use borbatop_core::{
     Bytes, BytesPerSecond, History, LoadAvg, MemInfo, MilliCelsius, Permille, Pid, Pressure,
-    ProcessState, ThreadCount, UnitList, Upgrade,
+    ProcessState, StartTime, ThreadCount, UnitList, Upgrade,
 };
 
 /// One row of the process table.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` hides the command line: arguments often carry passwords and personal data.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProcessRow {
     /// Process identifier.
     pub pid: Pid,
+    /// When this incarnation of the PID started; with `pid` it identifies the process.
+    pub start_time: StartTime,
     /// Parent process identifier.
     pub parent: Pid,
     /// Owner name, or numeric UID when unknown.
@@ -30,6 +34,25 @@ pub struct ProcessRow {
     pub package: String,
     /// Full command line.
     pub command: String,
+}
+
+impl std::fmt::Debug for ProcessRow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProcessRow")
+            .field("pid", &self.pid)
+            .field("start_time", &self.start_time)
+            .field("parent", &self.parent)
+            .field("user", &self.user)
+            .field("state", &self.state)
+            .field("cpu", &self.cpu)
+            .field("memory", &self.memory)
+            .field("threads", &self.threads)
+            .field("unit", &self.unit)
+            .field("package", &self.package)
+            .field("command", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Pressure-stall information of the three resources.

@@ -64,6 +64,16 @@ impl fmt::Display for Pid {
 pub struct StartTime(u64);
 
 impl StartTime {
+    /// Wraps a raw tick count since boot.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - clock ticks between boot and the process start
+    #[must_use]
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
     /// The raw tick count since boot.
     #[must_use]
     pub const fn get(self) -> u64 {
@@ -81,6 +91,17 @@ pub struct ProcessId {
 }
 
 impl ProcessId {
+    /// Identity of the process with this PID that started at `start_time`.
+    ///
+    /// # Arguments
+    ///
+    /// * `pid` - process identifier
+    /// * `start_time` - when that incarnation of the PID started
+    #[must_use]
+    pub const fn new(pid: Pid, start_time: StartTime) -> Self {
+        Self { pid, start_time }
+    }
+
     /// The process identifier.
     #[must_use]
     pub const fn pid(self) -> Pid {

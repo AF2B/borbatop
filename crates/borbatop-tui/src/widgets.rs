@@ -6,6 +6,7 @@ const BAR_FILLED: char = '█';
 const BAR_EMPTY: char = '░';
 const SPARK_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 const ELLIPSIS: char = '…';
+const REPLACEMENT: char = '\u{FFFD}';
 const FULL_SCALE: u64 = 1_000;
 const HALF_SCALE: u64 = 500;
 /// Usage from which a value is drawn as busy.
@@ -82,8 +83,23 @@ pub(crate) fn scale_of<'a>(values: impl Iterator<Item = &'a u64>) -> u64 {
     values.copied().max().unwrap_or(1).max(1)
 }
 
+/// `text` with every control character replaced, so untrusted names (process titles, log
+/// lines, file names) can never inject terminal escape sequences.
+pub(crate) fn safe(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character.is_control() {
+                REPLACEMENT
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 /// `text` cut to `width` characters (ending in `…`) or padded with spaces on the right.
 pub(crate) fn fit(text: &str, width: usize) -> String {
+    let text = safe(text);
     let length = text.chars().count();
     if length <= width {
         return format!("{text}{}", " ".repeat(width.saturating_sub(length)));
@@ -97,6 +113,7 @@ pub(crate) fn fit(text: &str, width: usize) -> String {
 
 /// `text` cut to `width` characters and padded with spaces on the left.
 pub(crate) fn fit_right(text: &str, width: usize) -> String {
+    let text = safe(text);
     let length = text.chars().count();
     if length <= width {
         return format!("{}{text}", " ".repeat(width.saturating_sub(length)));
@@ -145,6 +162,14 @@ mod tests {
         assert_eq!(fit("abc", 0), "");
         assert_eq!(fit_right("42", 5), "   42");
         assert_eq!(fit_right("123456", 4), "1234");
+    }
+
+    #[test]
+    fn control_characters_are_replaced_everywhere_text_is_fitted() {
+        assert_eq!(safe("a\x1b[31mb\x07c\n"), "a\u{FFFD}[31mb\u{FFFD}c\u{FFFD}");
+        assert!(!fit("\x1b]0;title\x07", 20).chars().any(char::is_control));
+        assert!(!fit_right("\x1b[2J", 20).chars().any(char::is_control));
+        assert_eq!(safe("ação"), "ação");
     }
 
     #[test]

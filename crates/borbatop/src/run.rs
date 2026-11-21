@@ -4,7 +4,7 @@ use std::io;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
-use borbatop_core::Pid;
+use borbatop_core::ProcessId;
 use borbatop_sources::send_signal;
 use borbatop_tui::{
     App, Command, MessageKind, SignalChoice, UiConfig, draw, is_interrupt, key_from_event,
@@ -37,7 +37,7 @@ pub fn run(settings: Settings) -> io::Result<()> {
         history_len: settings.history_len,
     });
 
-    let mut terminal = ratatui::init();
+    let mut terminal = ratatui::try_init()?;
     let result = event_loop(&mut terminal, app, &events, &received);
     ratatui::restore();
     result
@@ -95,7 +95,7 @@ fn apply(update: WorkerEvent, app: &mut App) {
 fn execute(command: Command, app: &mut App, events: &Sender<WorkerEvent>) -> bool {
     match command {
         Command::Quit => return false,
-        Command::SendSignal { pid, signal } => deliver(app, pid, signal),
+        Command::SendSignal { id, signal } => deliver(app, id, signal),
         Command::RefreshPacman => {
             let processes = app
                 .model()
@@ -122,8 +122,9 @@ fn execute(command: Command, app: &mut App, events: &Sender<WorkerEvent>) -> boo
     true
 }
 
-fn deliver(app: &mut App, pid: Pid, choice: SignalChoice) {
-    match send_signal(pid, signal_of(choice)) {
+fn deliver(app: &mut App, id: ProcessId, choice: SignalChoice) {
+    let pid = id.pid();
+    match send_signal(id, signal_of(choice)) {
         Ok(()) => app.notify(
             format!("{} sent to PID {pid}", choice.name()),
             MessageKind::Info,
