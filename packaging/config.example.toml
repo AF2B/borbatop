@@ -1,0 +1,17 @@
+# borbatop configuration: copy to ~/.config/borbatop/config.toml
+# Every key is optional; unknown keys are rejected. Command-line flags win over this file.
+
+# Time between samples, in milliseconds (200 to 10000).
+interval_ms = 1000
+
+# "borba" (24-bit color) or "ansi" (the terminal's own 16 colors).
+theme = "borba"
+
+# Start with processes arranged as a tree (same as `t` on the screen).
+tree = false
+
+# Show the column that names the package owning each executable.
+show_package = true
+
+# Samples kept for sparklines (8 to 600).
+history = 60

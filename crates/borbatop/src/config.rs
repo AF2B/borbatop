@@ -355,6 +355,14 @@ mod tests {
     }
 
     #[test]
+    fn the_shipped_example_is_valid_and_matches_the_defaults() {
+        let example = file(include_str!("../../../packaging/config.example.toml"));
+        let from_example = Settings::resolve(&example, Overrides::default()).unwrap();
+        let defaults = Settings::resolve(&FileConfig::default(), Overrides::default()).unwrap();
+        assert_eq!(from_example, defaults);
+    }
+
+    #[test]
     fn config_path_follows_xdg_then_home() {
         assert_eq!(
             default_path(Some("/xdg"), Some("/home/a")),

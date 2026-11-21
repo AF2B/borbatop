@@ -1,0 +1,55 @@
+# Maintainer: André Borba
+pkgname=borbatop-git
+pkgver=0.1.0.r0.g0000000
+pkgrel=1
+pkgdesc='Native Linux task manager for the terminal, made for Arch (development version)'
+arch=('x86_64' 'aarch64')
+url='https://example.invalid/borbatop' # set to the real repository before publishing
+license=('MIT' 'Apache-2.0')
+depends=('gcc-libs' 'glibc')
+makedepends=('cargo' 'git')
+provides=('borbatop')
+conflicts=('borbatop')
+source=("borbatop::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd borbatop
+  printf '0.1.0.r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  cd borbatop
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd borbatop
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release --all-features
+  for shell in bash zsh fish; do
+    target/release/borbatop completions "$shell" > "borbatop.$shell"
+  done
+  target/release/borbatop man > borbatop.1
+}
+
+check() {
+  cd borbatop
+  export RUSTUP_TOOLCHAIN=stable
+  # Only the pure crate: the others read /proc, systemd and pacman of the build host.
+  cargo test --frozen -p borbatop-core
+}
+
+package() {
+  cd borbatop
+  install -Dm755 target/release/borbatop "$pkgdir/usr/bin/borbatop"
+  install -Dm644 borbatop.1 "$pkgdir/usr/share/man/man1/borbatop.1"
+  install -Dm644 borbatop.bash "$pkgdir/usr/share/bash-completion/completions/borbatop"
+  install -Dm644 borbatop.zsh "$pkgdir/usr/share/zsh/site-functions/_borbatop"
+  install -Dm644 borbatop.fish "$pkgdir/usr/share/fish/vendor_completions.d/borbatop.fish"
+  install -Dm644 packaging/config.example.toml "$pkgdir/usr/share/doc/borbatop/config.example.toml"
+  install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/borbatop/LICENSE-MIT"
+  install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/borbatop/LICENSE-APACHE"
+}
