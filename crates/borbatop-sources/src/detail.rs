@@ -1,5 +1,6 @@
 //! Everything the kernel says about one process: files, sockets, limits and memory.
 
+use std::fmt;
 use std::fs;
 use std::path::Path;
 
@@ -20,12 +21,25 @@ const STATUS_FILE: &str = "status";
 const RESIDENT_KEY: &str = "VmRSS";
 const PEAK_KEY: &str = "VmHWM";
 const SWAP_KEY: &str = "VmSwap";
+const REDACTED: &str = "<redacted>";
 
 /// One open file descriptor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` hides what the descriptor points at: file names often carry personal data.
+#[derive(Clone, PartialEq, Eq)]
 pub struct OpenDescriptor {
     fd: u32,
     kind: FdKind,
+}
+
+impl fmt::Debug for OpenDescriptor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpenDescriptor")
+            .field("fd", &self.fd)
+            .field("kind", &REDACTED)
+            .finish()
+    }
 }
 
 impl OpenDescriptor {
@@ -43,7 +57,8 @@ impl OpenDescriptor {
 }
 
 /// What the kernel says about one process; each part may be unreadable on its own.
-#[derive(Debug)]
+///
+/// `Debug` hides the executable, directory and descriptors: paths often carry personal data.
 pub struct ProcessDetail {
     exe: Reading<String>,
     cwd: Reading<String>,
@@ -53,6 +68,19 @@ pub struct ProcessDetail {
     resident: Option<Bytes>,
     peak_resident: Option<Bytes>,
     swapped: Option<Bytes>,
+}
+
+impl fmt::Debug for ProcessDetail {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProcessDetail")
+            .field("exe", &REDACTED)
+            .field("cwd", &REDACTED)
+            .field("descriptors", &REDACTED)
+            .field("sockets", &self.sockets.len())
+            .field("resident", &self.resident)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ProcessDetail {
@@ -253,6 +281,19 @@ mod tests {
         assert!(detail.resident().unwrap().get() > 0);
         assert!(detail.peak_resident().unwrap() >= detail.resident().unwrap());
         drop(listener);
+    }
+
+    #[test]
+    fn debug_output_hides_paths() {
+        let detail = process_detail(own_id()).unwrap();
+        let cwd = detail.cwd().as_ref().unwrap().clone();
+
+        let printed = format!("{detail:?}");
+
+        assert!(!printed.contains(&cwd), "{printed}");
+        assert!(printed.contains("<redacted>"));
+        let descriptor = detail.descriptors().as_ref().unwrap().first().unwrap();
+        assert!(format!("{descriptor:?}").contains("<redacted>"));
     }
 
     #[test]
