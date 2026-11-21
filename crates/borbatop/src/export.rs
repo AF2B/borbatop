@@ -15,8 +15,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use borbatop_core::{Json, UnitRow, UtcDateTime};
 use borbatop_tui::{
-    AurView, ExportContent, ExportOrder, ExportRequest, KernelView, Model, PacmanView, Report,
-    StaleView,
+    AurView, ContainersView, ExportContent, ExportOrder, ExportRequest, KernelView, Model,
+    PacmanView, Report, StaleView,
 };
 
 use crate::snapshot::{
@@ -159,6 +159,7 @@ fn content_json(content: &ExportContent, model: &Model) -> Json {
             ("mounts", mounts_json(model)),
         ]),
         ExportContent::Pacman(view) => pacman_json(view),
+        ExportContent::Containers(view) => containers_json(view),
         ExportContent::Report(report) => report_json(report),
     }
 }
@@ -179,6 +180,38 @@ fn services(names: &[String], model: &Model) -> Json {
             .map(|unit| unit_json(unit))
             .collect(),
     )
+}
+
+fn containers_json(view: &ContainersView) -> Json {
+    Json::object([
+        (
+            "containers",
+            Json::Array(
+                view.containers
+                    .iter()
+                    .map(|container| {
+                        Json::object([
+                            ("runtime", Json::text(&container.runtime)),
+                            ("id", Json::text(&container.id)),
+                            ("name", Json::text(&container.name)),
+                            ("image", Json::text(&container.image)),
+                            ("status", Json::text(&container.status)),
+                            ("running", Json::Bool(container.running)),
+                            ("usage", Json::text(&container.usage)),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            "problems",
+            Json::Array(view.problems.iter().map(|text| Json::text(text)).collect()),
+        ),
+        (
+            "unlisted_scopes",
+            Json::Array(view.unlisted.iter().map(|text| Json::text(text)).collect()),
+        ),
+    ])
 }
 
 fn report_json(report: &Report) -> Json {
@@ -422,6 +455,36 @@ mod tests {
             "{text}"
         );
         assert!(text.contains(r#""tone":"bad","text":"kernel: bad""#));
+    }
+
+    #[test]
+    fn containers_export_their_state_and_problems() {
+        let view = ContainersView {
+            containers: vec![borbatop_tui::ContainerView {
+                runtime: "podman".to_owned(),
+                id: "0a1b2c3d4e5f".to_owned(),
+                name: "web".to_owned(),
+                image: "nginx".to_owned(),
+                status: "Up 3 hours".to_owned(),
+                running: true,
+                usage: "3 processes".to_owned(),
+            }],
+            problems: vec!["docker: permission denied".to_owned()],
+            has_runtime: true,
+            unlisted: vec!["ffffffffffff · 1 processes".to_owned()],
+        };
+        let mut shown = request(ExportContent::Containers(Box::new(view)));
+        shown.tab = Tab::Containers;
+
+        let text = export_json(&shown, &model(), &moment()).render();
+
+        assert!(
+            text.contains(r#""runtime":"podman","id":"0a1b2c3d4e5f","name":"web""#),
+            "{text}"
+        );
+        assert!(text.contains(r#""running":true"#));
+        assert!(text.contains(r#""problems":["docker: permission denied"]"#));
+        assert!(text.contains(r#""unlisted_scopes":["ffffffffffff · 1 processes"]"#));
     }
 
     #[test]

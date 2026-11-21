@@ -3,6 +3,7 @@
 const SCOPE_SUFFIX: &str = ".scope";
 const SCOPE_PREFIXES: [&str; 4] = ["libpod-", "docker-", "cri-containerd-", "crio-"];
 const FIELD_SEPARATOR: char = '\t';
+const RUNNING_STATE: &str = "running";
 
 /// The container identifier in a scope unit name such as `libpod-<id>.scope`.
 ///
@@ -43,7 +44,7 @@ pub fn same_container(full: &str, short: &str) -> bool {
     !short.is_empty() && full.starts_with(short)
 }
 
-/// One row of `ps --format '{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}'`.
+/// One row of `ps -a --format '{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.State}}'`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerInfo {
     /// Identifier, as the runtime prints it (usually the first 12 hexadecimal digits).
@@ -54,6 +55,16 @@ pub struct ContainerInfo {
     pub image: String,
     /// Status text, for example `Up 3 hours`.
     pub status: String,
+    /// Lifecycle state as the runtime names it (`running`, `exited`, `created`, ...).
+    pub state: String,
+}
+
+impl ContainerInfo {
+    /// Whether the container is running now.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        self.state == RUNNING_STATE
+    }
 }
 
 /// Parses the tab-separated listing of a container runtime; lines with the wrong number of
@@ -72,6 +83,7 @@ pub fn parse_container_list(text: &str) -> Vec<ContainerInfo> {
                 name: fields.next()?.to_owned(),
                 image: fields.next()?.to_owned(),
                 status: fields.next()?.to_owned(),
+                state: fields.next()?.to_owned(),
             };
             (fields.next().is_none() && !info.id.is_empty()).then_some(info)
         })
@@ -117,11 +129,18 @@ mod tests {
     #[test]
     fn listings_parse_and_malformed_rows_are_left_out() {
         let rows = parse_container_list(
-            "0a1b2c3d4e5f\tweb\tdocker.io/library/nginx:latest\tUp 3 hours\nbroken line\n\tno-id\timg\tUp\nabc\tdb\tpostgres\tUp 1 hour\textra\n",
+            "0a1b2c3d4e5f\tweb\tdocker.io/library/nginx:latest\tUp 3 hours\trunning\nbroken line\n\tno-id\timg\tUp\trunning\nabc\tdb\tpostgres\tUp 1 hour\trunning\textra\n9e8d7c6b5a49\told\talpine\tExited (0) 2 days ago\texited\n",
         );
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
         let web = rows.first().unwrap();
         assert_eq!(web.name, "web");
         assert_eq!(web.status, "Up 3 hours");
+        assert!(web.is_running());
+        let old = rows.get(1).unwrap();
+        assert_eq!(old.state, "exited");
+        assert!(
+            !old.is_running(),
+            "a stopped container is listed but not running"
+        );
     }
 }

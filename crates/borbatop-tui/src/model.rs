@@ -158,6 +158,38 @@ pub struct PacmanView {
     pub stale_unreadable: usize,
 }
 
+/// One container as the runtime lists it, with what its processes use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerView {
+    /// Runtime that owns it (`podman` or `docker`).
+    pub runtime: String,
+    /// Identifier, as the runtime prints it.
+    pub id: String,
+    /// Name given to the container.
+    pub name: String,
+    /// Image it was created from.
+    pub image: String,
+    /// Status text, for example `Up 3 hours`.
+    pub status: String,
+    /// Whether it is running now.
+    pub running: bool,
+    /// CPU and memory of its processes, ready to show.
+    pub usage: String,
+}
+
+/// Everything the Containers tab shows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContainersView {
+    /// Containers of every installed runtime, running or not.
+    pub containers: Vec<ContainerView>,
+    /// Runtimes that could not list their containers, with the reason.
+    pub problems: Vec<String>,
+    /// Whether at least one runtime answered.
+    pub has_runtime: bool,
+    /// Container scopes that run processes but that no runtime listed, ready to show.
+    pub unlisted: Vec<String>,
+}
+
 /// How a line of a [`Report`] should look.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReportTone {

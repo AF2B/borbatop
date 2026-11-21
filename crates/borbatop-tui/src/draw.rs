@@ -12,7 +12,7 @@ use crate::app::{
 };
 use crate::dialog::{Dialog, Tone};
 use crate::input::{SortKey, Tab};
-use crate::model::{Model, PacmanView, ProcessRow, Report, ReportTone};
+use crate::model::{ContainerView, Model, PacmanView, ProcessRow, Report, ReportTone};
 use crate::mouse::{HitMap, ListRows, Run};
 use crate::theme::Theme;
 use crate::widgets::{Heat, bar_text, fit, fit_right, heat_of, safe, scale_of, sparkline};
@@ -45,6 +45,10 @@ const PACKAGE_WIDTH: usize = 16;
 const SERVICE_NAME_WIDTH: usize = 40;
 const ACTIVE_WIDTH: usize = 12;
 const SUB_WIDTH: usize = 10;
+const CONTAINER_NAME_WIDTH: usize = 24;
+const CONTAINER_ID_WIDTH: usize = 12;
+const RUNTIME_WIDTH: usize = 7;
+const CONTAINER_STATUS_WIDTH: usize = 26;
 const MOUNT_WIDTH: usize = 16;
 const FS_TYPE_WIDTH: usize = 6;
 const INTERFACE_WIDTH: usize = 12;
@@ -132,7 +136,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Tab::Services => draw_services(frame, body, app, &styles),
         Tab::Pacman => draw_pacman(frame, body, app, &styles),
         Tab::Io => draw_io(frame, body, app, &styles),
-        Tab::Connections | Tab::Boot | Tab::Logs | Tab::Gpu | Tab::Containers => {
+        Tab::Containers => draw_containers(frame, body, app, &styles),
+        Tab::Connections | Tab::Boot | Tab::Logs | Tab::Gpu => {
             draw_report(frame, body, app, &styles);
         }
     }
@@ -971,6 +976,152 @@ fn draw_report(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
     draw_scrolling(frame, inner, lines, app, styles);
 }
 
+fn container_line(
+    container: &ContainerView,
+    selected: bool,
+    styles: &Styles,
+    width: usize,
+) -> Line<'static> {
+    let (icon, style) = if container.running {
+        ("●", styles.ok)
+    } else {
+        ("○", styles.secondary)
+    };
+    let cells = [
+        (format!("{icon} "), style),
+        (
+            format!("{} ", fit(&container.name, CONTAINER_NAME_WIDTH)),
+            styles.base,
+        ),
+        (
+            format!("{} ", fit(&container.id, CONTAINER_ID_WIDTH)),
+            styles.secondary,
+        ),
+        (
+            format!("{} ", fit(&container.runtime, RUNTIME_WIDTH)),
+            styles.accent,
+        ),
+        (
+            format!("{} ", fit(&container.status, CONTAINER_STATUS_WIDTH)),
+            style,
+        ),
+    ];
+    let used: usize = cells.iter().map(|(text, _)| text.chars().count()).sum();
+    let detail = format!("{} · {}", container.image, container.usage);
+
+    let mut spans: Vec<Span<'static>> = cells
+        .into_iter()
+        .map(|(text, cell_style)| {
+            Span::styled(
+                text,
+                if selected {
+                    styles.selected
+                } else {
+                    cell_style
+                },
+            )
+        })
+        .collect();
+    spans.push(Span::styled(
+        fit(&detail, width.saturating_sub(used)),
+        if selected {
+            styles.selected
+        } else {
+            styles.secondary
+        },
+    ));
+    Line::from(spans)
+}
+
+fn container_notes(view: &crate::model::ContainersView, styles: &Styles) -> Vec<Line<'static>> {
+    let mut notes: Vec<Line<'static>> = view
+        .problems
+        .iter()
+        .map(|problem| Line::styled(format!("  {}", safe(problem)), styles.danger))
+        .collect();
+    if !view.has_runtime && view.problems.is_empty() {
+        notes.push(Line::styled(
+            "no container runtime found (looked for podman and docker)",
+            styles.secondary,
+        ));
+    }
+    if !view.unlisted.is_empty() {
+        notes.push(section("Container scopes seen in the process list", styles));
+        notes.extend(
+            view.unlisted
+                .iter()
+                .map(|text| Line::styled(format!("  {}", safe(text)), styles.secondary)),
+        );
+    }
+    notes
+}
+
+fn draw_containers(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
+    let title = if app.is_containers_loading() {
+        "Containers · loading…"
+    } else {
+        "Containers"
+    };
+    let block = panel(title, styles);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(crate::app::Fetch::Loaded(view)) = &app.containers else {
+        let text = if app.is_containers_loading() {
+            "reading…"
+        } else {
+            "press R to list the containers"
+        };
+        frame.render_widget(
+            Paragraph::new(Line::styled(text, styles.secondary)).style(styles.base),
+            inner,
+        );
+        return;
+    };
+
+    let notes = container_notes(view, styles);
+    let rows = usize::from(inner.height)
+        .saturating_sub(1)
+        .saturating_sub(notes.len())
+        .max(1);
+    let containers = &view.containers;
+    let selected = containers.iter().position(|container| {
+        Some((container.runtime.clone(), container.id.clone())) == app.selected_container
+    });
+    let start = window_start(selected, containers.len(), rows);
+    app.hits.borrow_mut().list = Some(ListRows {
+        top: inner.y.saturating_add(1),
+        first: start,
+        shown: containers.len().saturating_sub(start).min(rows),
+    });
+
+    let mut lines = vec![Line::from(Span::styled(
+        format!(
+            "  {} {} {} {} IMAGE · USAGE",
+            fit("NAME", CONTAINER_NAME_WIDTH),
+            fit("ID", CONTAINER_ID_WIDTH),
+            fit("RUNTIME", RUNTIME_WIDTH),
+            fit("STATUS", CONTAINER_STATUS_WIDTH),
+        ),
+        styles.accent,
+    ))];
+    if containers.is_empty() && view.has_runtime {
+        lines.push(Line::styled("no containers", styles.secondary));
+    }
+    lines.extend(containers.iter().enumerate().skip(start).take(rows).map(
+        |(position, container)| {
+            container_line(
+                container,
+                selected == Some(position),
+                styles,
+                to_width(inner),
+            )
+        },
+    ));
+    lines.extend(notes);
+    frame.render_widget(Paragraph::new(lines).style(styles.base), inner);
+}
+
 fn rate_text(rate: Option<borbatop_core::BytesPerSecond>) -> String {
     rate.map_or_else(|| NOT_AVAILABLE.to_owned(), |rate| rate.to_string())
 }
@@ -1107,7 +1258,15 @@ fn hints_for(tab: Tab) -> &'static [(&'static str, &'static str)] {
             ("␣", "pause"),
             ("q", "quit"),
         ],
-        Tab::Pacman | Tab::Connections | Tab::Boot | Tab::Logs | Tab::Gpu | Tab::Containers => &[
+        Tab::Containers => &[
+            ("↑↓", "move"),
+            ("a", "action"),
+            ("l", "logs"),
+            ("R", "refresh"),
+            ("e", "export"),
+            ("q", "quit"),
+        ],
+        Tab::Pacman | Tab::Connections | Tab::Boot | Tab::Logs | Tab::Gpu => &[
             ("↑↓", "scroll"),
             ("R", "refresh"),
             ("e", "export"),
@@ -1732,6 +1891,65 @@ mod tests {
         let text = screen(&app);
         assert!(text.contains("PROCESS · PID 7 · tool"));
         assert!(text.contains("Descriptors  3 open"));
+    }
+
+    #[test]
+    fn the_containers_tab_lists_every_container_with_its_state_and_notes() {
+        use crate::model::{ContainerView, ContainersView};
+
+        let mut app = app();
+        for _ in 0..5 {
+            app.tick();
+        }
+        app.handle_key(Key::Char('9'));
+        assert!(screen(&app).contains("CONTAINERS · LOADING"));
+
+        app.set_containers(Ok(ContainersView {
+            containers: vec![
+                ContainerView {
+                    runtime: "podman".to_owned(),
+                    id: "0a1b2c3d4e5f".to_owned(),
+                    name: "web".to_owned(),
+                    image: "docker.io/library/nginx".to_owned(),
+                    status: "Up 3 hours".to_owned(),
+                    running: true,
+                    usage: "3 processes · cpu 0.4% · mem 54.0M".to_owned(),
+                },
+                ContainerView {
+                    runtime: "docker".to_owned(),
+                    id: "9e8d7c6b5a49".to_owned(),
+                    name: "old".to_owned(),
+                    image: "alpine".to_owned(),
+                    status: "Exited (0) 2 days ago".to_owned(),
+                    running: false,
+                    usage: "no process visible".to_owned(),
+                },
+            ],
+            problems: vec!["docker: permission denied".to_owned()],
+            has_runtime: true,
+            unlisted: vec!["ffffffffffff · 1 processes".to_owned()],
+        }));
+        let text = screen(&app);
+
+        for expected in [
+            "● web",
+            "○ old",
+            "0a1b2c3d4e5f",
+            "Exited (0) 2 days ago",
+            "docker: permission denied",
+            "Container scopes seen in the process list"
+                .to_uppercase()
+                .as_str(),
+            "ffffffffffff",
+            "a action",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?}\n{text}");
+        }
+
+        app.handle_key(Key::Char('a'));
+        let dialog = screen(&app);
+        assert!(dialog.contains("CONTAINER"));
+        assert!(dialog.contains("delete it (must be stopped)"));
     }
 
     #[test]

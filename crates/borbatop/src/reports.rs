@@ -12,7 +12,7 @@ use borbatop_core::{
     container_id_of_unit, same_container,
 };
 use borbatop_sources::{Connection, ConnectionReport, GpuReport, ProcessDetail, RuntimeListing};
-use borbatop_tui::{Report, ReportLine, ReportTone};
+use borbatop_tui::{ContainerView, ContainersView, Report, ReportLine, ReportTone};
 
 const ADDRESS_WIDTH: usize = 28;
 const STATE_WIDTH: usize = 12;
@@ -514,82 +514,69 @@ fn usage_text(totals: Option<&Totals>) -> String {
 /// * `listings` - what every installed runtime answered
 /// * `usage` - CPU and memory of the running processes, matched to containers by their unit
 #[must_use]
-pub fn containers_report(listings: &[RuntimeListing], usage: &[ProcessUsage]) -> Report {
+pub fn containers_view(listings: &[RuntimeListing], usage: &[ProcessUsage]) -> ContainersView {
     let totals = totals_by_container(usage);
-    let mut lines = Vec::new();
+    let mut view = ContainersView {
+        has_runtime: !listings.is_empty(),
+        ..ContainersView::default()
+    };
     let mut listed_ids: Vec<&str> = Vec::new();
 
     for listing in listings {
-        lines.push(line(listing.runtime(), ReportTone::Heading));
         match listing.containers() {
-            Ok(containers) if containers.is_empty() => {
-                lines.push(line("  no running containers", ReportTone::Dim));
-            }
             Ok(containers) => {
                 for container in containers {
                     listed_ids.push(&container.id);
-                    lines.extend(container_lines(container, &totals));
+                    view.containers
+                        .push(container_view(listing.runtime(), container, &totals));
                 }
             }
-            Err(error) => lines.push(line(format!("  {error}"), ReportTone::Bad)),
+            Err(error) => view
+                .problems
+                .push(format!("{}: {error}", listing.runtime())),
         }
     }
-    if listings.is_empty() {
-        lines.push(line(
-            "no container runtime found (looked for podman and docker)",
-            ReportTone::Dim,
-        ));
-    }
-    lines.extend(unlisted_scope_lines(&totals, &listed_ids));
-    Report { lines }
-}
-
-/// Two lines for one listed container: who it is, and what its processes use.
-fn container_lines(container: &ContainerInfo, totals: &BTreeMap<&str, Totals>) -> [ReportLine; 2] {
-    let found = totals
-        .iter()
-        .find(|(full, _)| same_container(full, &container.id))
-        .map(|(_, total)| total);
-    [
-        line(
-            format!(
-                "  {} · {} · {}",
-                container.name, container.id, container.status
-            ),
-            ReportTone::Good,
-        ),
-        line(
-            format!("    {} · {}", container.image, usage_text(found)),
-            ReportTone::Normal,
-        ),
-    ]
+    view.unlisted = unlisted_scopes(&totals, &listed_ids);
+    view
 }
 
 /// Container scopes that run processes but that no installed runtime listed (the runtime may be
 /// missing, stopped, or refuse this user), biggest memory first.
-fn unlisted_scope_lines(totals: &BTreeMap<&str, Totals>, listed_ids: &[&str]) -> Vec<ReportLine> {
+fn unlisted_scopes(totals: &BTreeMap<&str, Totals>, listed_ids: &[&str]) -> Vec<String> {
     let mut unlisted: Vec<(&str, &Totals)> = totals
         .iter()
         .filter(|(full, _)| !listed_ids.iter().any(|short| same_container(full, short)))
         .map(|(id, total)| (*id, total))
         .collect();
-    if unlisted.is_empty() {
-        return Vec::new();
-    }
     unlisted.sort_by_key(|(_, total)| Reverse(total.memory));
+    unlisted
+        .into_iter()
+        .map(|(id, total)| {
+            let short = id.get(..SHORT_ID_LEN).unwrap_or(id);
+            format!("{short} · {}", usage_text(Some(total)))
+        })
+        .collect()
+}
 
-    let mut lines = vec![line(
-        "Container scopes seen in the process list",
-        ReportTone::Heading,
-    )];
-    for (id, total) in unlisted {
-        let short = id.get(..SHORT_ID_LEN).unwrap_or(id);
-        lines.push(line(
-            format!("  {short} · {}", usage_text(Some(total))),
-            ReportTone::Normal,
-        ));
+/// One listed container, with the CPU and memory of the processes found in its scope.
+fn container_view(
+    runtime: &str,
+    container: &ContainerInfo,
+    totals: &BTreeMap<&str, Totals>,
+) -> ContainerView {
+    let found = totals
+        .iter()
+        .find(|(full, _)| same_container(full, &container.id))
+        .map(|(_, total)| total);
+    ContainerView {
+        runtime: runtime.to_owned(),
+        id: container.id.clone(),
+        name: container.name.clone(),
+        image: container.image.clone(),
+        status: container.status.clone(),
+        running: container.is_running(),
+        usage: usage_text(found),
     }
-    lines
 }
 
 #[cfg(test)]
@@ -743,6 +730,7 @@ mod tests {
             name: name.to_owned(),
             image: "docker.io/library/nginx".to_owned(),
             status: "Up 3 hours".to_owned(),
+            state: "running".to_owned(),
         }
     }
 
@@ -767,29 +755,45 @@ mod tests {
             usage("docker-ffffffffffff00000000.scope", 5, 2_097_152),
         ];
 
-        let report = containers_report(&listings, &processes);
-        let rows = texts(&report);
+        let view = containers_view(&listings, &processes);
 
-        assert_eq!(rows[0], "podman");
-        assert!(rows[1].contains("web") && rows[1].contains("0a1b2c3d4e5f"));
-        assert!(
-            rows[2].contains("2 processes")
-                && rows[2].contains("cpu 15.0%")
-                && rows[2].contains("mem 2.0M")
-        );
-        assert!(rows.contains(&"Container scopes seen in the process list"));
-        assert!(
-            rows.iter()
-                .any(|row| row.contains("ffffffffffff") && row.contains("1 processes"))
-        );
+        let [web] = view.containers.as_slice() else {
+            return assert_eq!(view.containers.len(), 1);
+        };
+        assert_eq!((web.runtime.as_str(), web.name.as_str()), ("podman", "web"));
+        assert!(web.running);
+        assert!(web.usage.contains("2 processes"), "{}", web.usage);
+        assert!(web.usage.contains("cpu 15.0%") && web.usage.contains("mem 2.0M"));
+        assert_eq!(view.unlisted.len(), 1);
+        assert!(view.unlisted[0].starts_with("ffffffffffff"));
+        assert!(view.unlisted[0].contains("1 processes"));
+        assert!(view.has_runtime);
     }
 
     #[test]
-    fn no_runtime_and_no_containers_have_their_own_messages() {
-        let none = containers_report(&[], &[]);
-        assert!(texts(&none)[0].contains("no container runtime found"));
+    fn a_stopped_container_has_no_processes_and_says_so() {
+        let mut stopped = container("9e8d7c6b5a49", "old");
+        stopped.state = "exited".to_owned();
+        let view = containers_view(&[RuntimeListing::new("docker", Ok(vec![stopped]))], &[]);
+        assert!(!view.containers[0].running);
+        assert_eq!(view.containers[0].usage, "no process visible");
+    }
 
-        let empty = containers_report(&[RuntimeListing::new("docker", Ok(Vec::new()))], &[]);
-        assert_eq!(texts(&empty), ["docker", "  no running containers"]);
+    #[test]
+    fn no_runtime_and_a_failing_runtime_are_told_apart() {
+        let none = containers_view(&[], &[]);
+        assert!(!none.has_runtime);
+        assert_eq!(none.containers, []);
+
+        let failing = containers_view(
+            &[RuntimeListing::new(
+                "docker",
+                Err(borbatop_sources::SourceError::ProcessGone(Pid::new(1))),
+            )],
+            &[],
+        );
+        assert!(failing.has_runtime);
+        assert_eq!(failing.problems.len(), 1);
+        assert!(failing.problems[0].starts_with("docker: "));
     }
 }

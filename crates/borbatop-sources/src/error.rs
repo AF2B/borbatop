@@ -109,6 +109,10 @@ pub enum CommandError {
     },
     /// A unit name contains characters that no systemd unit can have.
     InvalidUnitName(String),
+    /// A container identifier or name contains characters no container can have.
+    InvalidContainer(String),
+    /// The container runtime is not one this program knows how to drive.
+    UnknownRuntime(String),
 }
 
 impl fmt::Display for CommandError {
@@ -126,6 +130,8 @@ impl fmt::Display for CommandError {
                 stderr,
             } => write!(formatter, "{program} was killed: {stderr}"),
             Self::InvalidUnitName(name) => write!(formatter, "invalid unit name: {name:?}"),
+            Self::InvalidContainer(name) => write!(formatter, "invalid container: {name:?}"),
+            Self::UnknownRuntime(name) => write!(formatter, "unknown container runtime: {name:?}"),
         }
     }
 }
@@ -134,7 +140,10 @@ impl Error for CommandError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Spawn { source, .. } => Some(source),
-            Self::Failed { .. } | Self::InvalidUnitName(_) => None,
+            Self::Failed { .. }
+            | Self::InvalidUnitName(_)
+            | Self::InvalidContainer(_)
+            | Self::UnknownRuntime(_) => None,
         }
     }
 }

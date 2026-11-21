@@ -20,7 +20,9 @@ mod system;
 mod units;
 
 pub use connections::{Connection, ConnectionReport, SocketOwner, collect_connections};
-pub use containers::{RuntimeListing, list_containers};
+pub use containers::{
+    ContainerAction, RuntimeListing, container_logs, control_container, list_containers,
+};
 pub use detail::{OpenDescriptor, ProcessDetail, process_detail};
 pub use diagnostics::{JournalLevel, startup_blame, startup_summary, system_journal};
 pub use error::{CommandError, ParseCause, Reading, SourceError};
