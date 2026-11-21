@@ -8,6 +8,13 @@ url='https://example.invalid/borbatop' # set to the real repository before publi
 license=('MIT' 'Apache-2.0')
 depends=('gcc-libs' 'glibc')
 makedepends=('cargo')
+optdepends=('systemd: Services, Boot and Logs tabs'
+            'pacman: Pacman tab and package names'
+            'nvidia-utils: NVIDIA readings in the GPU tab'
+            'podman: Containers tab'
+            'docker: Containers tab'
+            'yay: AUR upgrades in the Pacman tab'
+            'paru: AUR upgrades in the Pacman tab')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP') # replace with the release tarball checksum
 
