@@ -4,6 +4,7 @@ mod cli;
 mod config;
 mod convert;
 mod model;
+mod recording;
 mod reports;
 mod run;
 mod snapshot;
@@ -37,7 +38,7 @@ fn start() -> Result<(), Box<dyn Error>> {
             return Ok(());
         }
         Some(Extra::Man) => return Ok(write_man_page(&mut io::stdout())?),
-        Some(Extra::Snapshot { .. }) | None => {}
+        Some(Extra::Snapshot { .. } | Extra::Record { .. } | Extra::Replay { .. }) | None => {}
     }
 
     let path = cli.config.clone().or_else(|| {
@@ -55,6 +56,25 @@ fn start() -> Result<(), Box<dyn Error>> {
         let json = snapshot::capture(settings, snapshot_command.command_lines())?;
         writeln!(io::stdout(), "{}", json.render())?;
         return Ok(());
+    }
+
+    match &cli.command {
+        Some(Extra::Record {
+            file,
+            samples,
+            with_commands,
+        }) => {
+            let commands = Extra::command_lines_for(*with_commands);
+            recording::record(settings, file, *samples, commands)?;
+            eprintln!("recorded {samples} samples to {}", file.display());
+            return Ok(());
+        }
+        Some(Extra::Replay { file }) => {
+            let models = recording::load(file, settings.history_len)?;
+            run::replay(settings, models)?;
+            return Ok(());
+        }
+        Some(Extra::Completions { .. } | Extra::Man | Extra::Snapshot { .. }) | None => {}
     }
 
     if !io::stdout().is_terminal() {

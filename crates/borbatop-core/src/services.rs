@@ -37,6 +37,16 @@ pub enum ActiveState {
 }
 
 impl ActiveState {
+    /// The state named by `text` (`active`, `failed`, ...), as `systemctl` prints it.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - lower-case state name
+    #[must_use]
+    pub fn from_name(text: &str) -> Option<Self> {
+        Self::from_text(text)
+    }
+
     fn from_text(text: &str) -> Option<Self> {
         match text {
             "active" => Some(Self::Active),
@@ -77,6 +87,24 @@ pub struct UnitRow {
 }
 
 impl UnitRow {
+    /// A unit from known values.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - unit name
+    /// * `active` - activation state
+    /// * `sub` - low-level state
+    /// * `description` - human description
+    #[must_use]
+    pub fn new(name: &str, active: ActiveState, sub: &str, description: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            active,
+            sub: sub.to_owned(),
+            description: description.to_owned(),
+        }
+    }
+
     /// Unit name (`sshd.service`).
     #[must_use]
     pub fn name(&self) -> &str {
@@ -110,6 +138,17 @@ pub struct UnitList {
 }
 
 impl UnitList {
+    /// A list from known units.
+    ///
+    /// # Arguments
+    ///
+    /// * `units` - the units
+    /// * `skipped` - lines that could not be read when the list was parsed
+    #[must_use]
+    pub const fn new(units: Vec<UnitRow>, skipped: usize) -> Self {
+        Self { units, skipped }
+    }
+
     /// Units in the order `systemctl` printed them.
     #[must_use]
     pub fn units(&self) -> &[UnitRow] {

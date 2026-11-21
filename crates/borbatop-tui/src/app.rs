@@ -8,7 +8,7 @@ use borbatop_core::{ActiveState, Pid, ProcessId, UnitRow, order_as_tree};
 
 use crate::alerts::{Alert, AlertThresholds, evaluate};
 use crate::dialog::{Dialog, DialogOutcome};
-use crate::input::{Command, Key, SortKey, Tab};
+use crate::input::{Command, Key, Seek, SortKey, Tab};
 use crate::model::{Model, PacmanView, ProcessRow, Report, ReportLine, ReportTone};
 use crate::mouse::{HitMap, Mouse};
 use crate::theme::ThemeKind;
@@ -178,6 +178,8 @@ pub struct App {
     pub(crate) dialog: Option<Dialog>,
     pub(crate) logs: Option<LogView>,
     pub(crate) message: Option<Message>,
+    /// Position within a recording being replayed: `(index, total)`, counted from zero.
+    pub(crate) replay: Option<(usize, usize)>,
     pub(crate) alerts: Vec<Alert>,
     pub(crate) pacman: PacmanState,
     pub(crate) reports: HashMap<Tab, Fetch<Report>>,
@@ -225,6 +227,7 @@ impl App {
             dialog: None,
             logs: None,
             message: None,
+            replay: None,
             alerts: Vec::new(),
             pacman: PacmanState::NotRequested,
             reports: HashMap::new(),
@@ -250,6 +253,28 @@ impl App {
             self.refresh_alerts();
         }
         self.ensure_selection();
+    }
+
+    /// Shows `model` even while paused: stepping through a recording is deliberate.
+    ///
+    /// # Arguments
+    ///
+    /// * `model` - the sample to show
+    pub fn show_model(&mut self, model: Model) {
+        self.model = model;
+        self.model_version = self.model_version.wrapping_add(1);
+        self.refresh_alerts();
+        self.ensure_selection();
+    }
+
+    /// Marks the screen as replaying a recording and says where in it the shown sample sits.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - zero-based position of the shown sample
+    /// * `total` - number of samples in the recording
+    pub fn set_replay(&mut self, index: usize, total: usize) {
+        self.replay = Some((index, total));
     }
 
     /// Re-evaluates the alerts and announces the ones that just appeared.
@@ -429,6 +454,8 @@ impl App {
                 self.filter.clear();
                 None
             }
+            Key::Left => Some(Command::Seek(Seek::Backward)),
+            Key::Right => Some(Command::Seek(Seek::Forward)),
             Key::Enter => self.request_detail(),
             Key::Backspace => None,
         }
@@ -943,7 +970,14 @@ fn nav_of(key: Key) -> Option<Nav> {
         Key::PageDown => Some(Nav::PageDown),
         Key::Home | Key::Char('g') => Some(Nav::Top),
         Key::End | Key::Char('G') => Some(Nav::Bottom),
-        Key::Char(_) | Key::Enter | Key::Escape | Key::Backspace | Key::Tab | Key::BackTab => None,
+        Key::Char(_)
+        | Key::Left
+        | Key::Right
+        | Key::Enter
+        | Key::Escape
+        | Key::Backspace
+        | Key::Tab
+        | Key::BackTab => None,
     }
 }
 
@@ -1125,6 +1159,46 @@ mod tests {
         app.handle_key(Key::Char('2'));
         app.handle_key(Key::Char('K'));
         assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn arrow_keys_ask_to_step_through_a_recording() {
+        let mut app = app_with(vec![row(1, 0, 5, "a")]);
+        assert_eq!(
+            app.handle_key(Key::Left),
+            Some(Command::Seek(Seek::Backward))
+        );
+        assert_eq!(
+            app.handle_key(Key::Right),
+            Some(Command::Seek(Seek::Forward))
+        );
+
+        app.handle_key(Key::Char('K'));
+        assert_eq!(
+            app.handle_key(Key::Left),
+            None,
+            "a dialog keeps the arrows to itself"
+        );
+    }
+
+    #[test]
+    fn show_model_ignores_the_pause_that_apply_model_respects() {
+        let mut app = app_with(vec![row(1, 0, 5, "a")]);
+        app.handle_key(Key::Char(' '));
+        assert!(app.is_paused());
+
+        let mut next = Model::empty(4);
+        next.processes = vec![row(2, 0, 5, "b")];
+        app.apply_model(next.clone());
+        assert_eq!(app.model().processes.first().map(|p| p.pid.get()), Some(1));
+
+        app.show_model(next);
+        assert_eq!(app.model().processes.first().map(|p| p.pid.get()), Some(2));
+        assert_eq!(
+            app.selected_pid,
+            Some(Pid::new(2)),
+            "the selection follows the new sample"
+        );
     }
 
     #[test]

@@ -160,6 +160,16 @@ impl fmt::Display for Nice {
 pub struct ThreadCount(u32);
 
 impl ThreadCount {
+    /// Wraps a raw thread count.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - number of threads
+    #[must_use]
+    pub const fn new(raw: u32) -> Self {
+        Self(raw)
+    }
+
     /// The raw thread count.
     #[must_use]
     pub const fn get(self) -> u32 {

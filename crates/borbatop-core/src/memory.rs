@@ -69,6 +69,24 @@ pub struct MemInfo {
 }
 
 impl MemInfo {
+    /// Memory and swap from already-known amounts (for example, a recorded sample).
+    ///
+    /// # Arguments
+    ///
+    /// * `total` - physical memory installed
+    /// * `available` - memory that can be given to programs without swapping
+    /// * `swap_total` - swap space configured
+    /// * `swap_free` - swap space not in use
+    #[must_use]
+    pub const fn new(total: Bytes, available: Bytes, swap_total: Bytes, swap_free: Bytes) -> Self {
+        Self {
+            total,
+            available,
+            swap_total,
+            swap_free,
+        }
+    }
+
     /// Physical memory installed.
     #[must_use]
     pub const fn total(&self) -> Bytes {
@@ -183,6 +201,18 @@ pub struct LoadAvg {
 }
 
 impl LoadAvg {
+    /// Load averages from known values.
+    ///
+    /// # Arguments
+    ///
+    /// * `one` - average over the last minute
+    /// * `five` - average over the last five minutes
+    /// * `fifteen` - average over the last fifteen minutes
+    #[must_use]
+    pub const fn new(one: Hundredths, five: Hundredths, fifteen: Hundredths) -> Self {
+        Self { one, five, fifteen }
+    }
+
     /// Average over the last minute.
     #[must_use]
     pub const fn one(&self) -> Hundredths {
@@ -271,6 +301,22 @@ pub struct PressureLine {
 }
 
 impl PressureLine {
+    /// A pressure line from known averages.
+    ///
+    /// # Arguments
+    ///
+    /// * `avg10` - share of the last 10 seconds spent stalled, in percent
+    /// * `avg60` - share of the last 60 seconds
+    /// * `avg300` - share of the last 300 seconds
+    #[must_use]
+    pub const fn new(avg10: Hundredths, avg60: Hundredths, avg300: Hundredths) -> Self {
+        Self {
+            avg10,
+            avg60,
+            avg300,
+        }
+    }
+
     /// Share of the last 10 seconds spent stalled, in percent.
     #[must_use]
     pub const fn avg10(&self) -> Hundredths {
@@ -298,6 +344,17 @@ pub struct Pressure {
 }
 
 impl Pressure {
+    /// Pressure of one resource from known lines.
+    ///
+    /// # Arguments
+    ///
+    /// * `some` - time when at least one task was stalled
+    /// * `full` - time when every task was stalled, when the kernel reports it
+    #[must_use]
+    pub const fn new(some: PressureLine, full: Option<PressureLine>) -> Self {
+        Self { some, full }
+    }
+
     /// Time when at least one task was stalled.
     #[must_use]
     pub const fn some(&self) -> PressureLine {

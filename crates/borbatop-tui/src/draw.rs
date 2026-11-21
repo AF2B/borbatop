@@ -194,10 +194,17 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
     } else {
         format!("linux {}", app.model.kernel_release)
     };
-    let state = if app.is_paused() {
-        Span::styled("  ⏸ PAUSED", styles.danger)
-    } else {
-        Span::styled("  ● live", styles.ok)
+    let state = match (app.replay, app.is_paused()) {
+        (Some((index, total)), true) => Span::styled(
+            format!("  ⏸ replay {}/{total}", index.saturating_add(1)),
+            styles.danger,
+        ),
+        (Some((index, total)), false) => Span::styled(
+            format!("  ▶ replay {}/{total}", index.saturating_add(1)),
+            styles.accent,
+        ),
+        (None, true) => Span::styled("  ⏸ PAUSED", styles.danger),
+        (None, false) => Span::styled("  ● live", styles.ok),
     };
     let info = Line::from(vec![Span::styled(kernel, styles.secondary), state]);
     frame.render_widget(
@@ -1716,6 +1723,20 @@ mod tests {
         let text = screen(&app);
         assert!(text.contains("PROCESS · PID 7 · tool"));
         assert!(text.contains("Descriptors  3 open"));
+    }
+
+    #[test]
+    fn the_header_says_where_a_replay_is() {
+        let mut app = App::new(UiConfig::default());
+        assert!(screen(&app).contains("● live"));
+
+        app.set_replay(2, 10);
+        let playing = screen(&app);
+        assert!(playing.contains("▶ replay 3/10"), "{playing}");
+        assert!(!playing.contains("live"));
+
+        app.handle_key(Key::Char(' '));
+        assert!(screen(&app).contains("⏸ replay 3/10"));
     }
 
     #[test]

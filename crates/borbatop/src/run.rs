@@ -2,13 +2,13 @@
 
 use std::io;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use borbatop_core::{Nice, ProcessId};
 use borbatop_sources::{ScheduleError, send_signal, set_affinity, set_nice};
 use borbatop_tui::{
-    App, Command, MessageKind, SignalChoice, UiConfig, draw, is_interrupt, key_from_event,
-    mouse_from_event,
+    App, Command, MessageKind, Model, Seek, SignalChoice, UiConfig, draw, is_interrupt,
+    key_from_event, mouse_from_event,
 };
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
@@ -36,21 +36,98 @@ const INPUT_POLL: Duration = Duration::from_millis(100);
 pub fn run(settings: Settings) -> io::Result<()> {
     let (events, received) = channel();
     let _sampler = spawn_sampler(settings, events.clone())?;
-    let app = App::new(UiConfig {
+    session(settings, new_app(settings), &events, &received, None)
+}
+
+/// Opens the screen over a recording and runs until the person quits.
+///
+/// The samples advance one per interval; Space pauses and the left and right arrows step.
+///
+/// # Arguments
+///
+/// * `settings` - validated settings; the interval paces the playback
+/// * `models` - the recorded samples, oldest first; must not be empty
+///
+/// # Errors
+///
+/// Returns the I/O error that stopped the terminal.
+pub fn replay(settings: Settings, models: Vec<Model>) -> io::Result<()> {
+    let (events, received) = channel();
+    let mut app = new_app(settings);
+    let replay = Replay::new(models, settings.interval);
+    replay.show(&mut app);
+    session(settings, app, &events, &received, Some(replay))
+}
+
+fn new_app(settings: Settings) -> App {
+    App::new(UiConfig {
         theme: settings.theme,
         tree: settings.tree,
         show_package: settings.show_package,
         history_len: settings.history_len,
         alerts: settings.alerts,
-    });
+    })
+}
 
+fn session(
+    settings: Settings,
+    app: App,
+    events: &Sender<WorkerEvent>,
+    received: &Receiver<WorkerEvent>,
+    replay: Option<Replay>,
+) -> io::Result<()> {
     let mut terminal = ratatui::try_init()?;
     let result = capture_mouse(settings.mouse)
-        .and_then(|()| event_loop(&mut terminal, app, &events, &received));
+        .and_then(|()| event_loop(&mut terminal, app, events, received, replay));
     // Best effort: the terminal is being restored, and there is nobody left to tell.
     let _released = capture_mouse_release(settings.mouse);
     ratatui::restore();
     result
+}
+
+/// A recording being played back: where it is and when the next sample is due.
+struct Replay {
+    models: Vec<Model>,
+    position: usize,
+    interval: Duration,
+    shown_at: Instant,
+}
+
+impl Replay {
+    fn new(models: Vec<Model>, interval: Duration) -> Self {
+        Self {
+            models,
+            position: 0,
+            interval,
+            shown_at: Instant::now(),
+        }
+    }
+
+    /// Puts the sample at the current position on the screen.
+    fn show(&self, app: &mut App) {
+        if let Some(model) = self.models.get(self.position) {
+            app.show_model(model.clone());
+            app.set_replay(self.position, self.models.len());
+        }
+    }
+
+    fn seek(&mut self, direction: Seek, app: &mut App) {
+        let last = self.models.len().saturating_sub(1);
+        self.position = match direction {
+            Seek::Backward => self.position.saturating_sub(1),
+            Seek::Forward => self.position.saturating_add(1).min(last),
+        };
+        self.shown_at = Instant::now();
+        self.show(app);
+    }
+
+    /// Moves to the next sample when it is due; a paused screen and the last sample stay put.
+    fn tick(&mut self, app: &mut App) {
+        let has_next = self.position.saturating_add(1) < self.models.len();
+        if !app.is_paused() && has_next && self.shown_at.elapsed() >= self.interval {
+            self.seek(Seek::Forward, app);
+        }
+    }
 }
 
 /// Asks the terminal to report clicks and the wheel, when wanted.
@@ -73,6 +150,7 @@ fn event_loop(
     mut app: App,
     events: &Sender<WorkerEvent>,
     received: &Receiver<WorkerEvent>,
+    mut replay: Option<Replay>,
 ) -> io::Result<()> {
     loop {
         terminal.draw(|frame| draw(frame, &app))?;
@@ -93,12 +171,15 @@ fn event_loop(
                 }
             };
             if let Some(command) = command
-                && !execute(command, &mut app, events)
+                && !dispatch(command, &mut app, events, replay.as_mut())
             {
                 return Ok(());
             }
         }
 
+        if let Some(replay) = replay.as_mut() {
+            replay.tick(&mut app);
+        }
         while let Ok(update) = received.try_recv() {
             apply(update, &mut app);
         }
@@ -121,10 +202,41 @@ fn apply(update: WorkerEvent, app: &mut App) {
     }
 }
 
+/// Routes a command: steps a recording, refuses to act on recorded data, or runs it for real.
+/// `false` means the program must quit.
+fn dispatch(
+    command: Command,
+    app: &mut App,
+    events: &Sender<WorkerEvent>,
+    replay: Option<&mut Replay>,
+) -> bool {
+    let Some(replay) = replay else {
+        return execute(command, app, events);
+    };
+    match command {
+        Command::Quit => return false,
+        Command::Seek(direction) => replay.seek(direction, app),
+        Command::LoadReport(_) | Command::RefreshPacman | Command::LoadLogs { .. } => {
+            return execute(command, app, events);
+        }
+        Command::SendSignal { .. }
+        | Command::SetNice { .. }
+        | Command::SetAffinity { .. }
+        | Command::ControlUnit { .. }
+        | Command::LoadDetail { .. } => app.notify(
+            "this is a recording: nothing here can be acted on",
+            MessageKind::Error,
+        ),
+    }
+    true
+}
+
 /// Runs a command; `false` means the program must quit.
 fn execute(command: Command, app: &mut App, events: &Sender<WorkerEvent>) -> bool {
     match command {
         Command::Quit => return false,
+        // Only a recording has samples to step through.
+        Command::Seek(_) => {}
         Command::SendSignal { id, signal } => deliver(app, id, signal),
         Command::SetNice { id, nice } => renice(app, id, nice),
         Command::SetAffinity { id, cpus } => pin(app, id, &cpus),

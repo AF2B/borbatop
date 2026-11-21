@@ -212,6 +212,16 @@ fn sectors_to_bytes(field: Option<&&str>) -> Result<Bytes, IoStatsError> {
 pub struct BytesPerSecond(u64);
 
 impl BytesPerSecond {
+    /// Wraps a raw rate.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - bytes per second
+    #[must_use]
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
     /// The raw rate.
     #[must_use]
     pub const fn get(self) -> u64 {

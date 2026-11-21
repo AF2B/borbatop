@@ -10,6 +10,8 @@ use crate::config::{Overrides, ThemeName};
 use crate::snapshot::CommandLines;
 
 const BINARY_NAME: &str = "borbatop";
+const DEFAULT_RECORDED_SAMPLES: u32 = 60;
+const MAX_RECORDED_SAMPLES: u32 = 3_600;
 
 /// Native Linux task manager for the terminal, made for Arch and Arch-based distributions.
 #[derive(Debug, Parser)]
@@ -61,6 +63,23 @@ pub enum Extra {
         #[arg(long)]
         with_commands: bool,
     },
+    /// Record samples to a new file (JSON Lines), to look at later with `replay`.
+    Record {
+        /// File to create; it must not exist. Only its owner can read it.
+        file: PathBuf,
+        /// How many samples to record, one per interval.
+        #[arg(short = 'n', long, default_value_t = DEFAULT_RECORDED_SAMPLES,
+              value_parser = clap::value_parser!(u32).range(1..=i64::from(MAX_RECORDED_SAMPLES)))]
+        samples: u32,
+        /// Include full command lines (they may contain secrets).
+        #[arg(long)]
+        with_commands: bool,
+    },
+    /// Open the screen over a recording instead of the live machine.
+    Replay {
+        /// Recording made by `record` (or a single `snapshot`).
+        file: PathBuf,
+    },
 }
 
 impl Extra {
@@ -68,14 +87,24 @@ impl Extra {
     #[must_use]
     pub const fn command_lines(&self) -> CommandLines {
         match self {
-            Self::Snapshot {
-                with_commands: true,
-            } => CommandLines::Include,
-            Self::Snapshot {
-                with_commands: false,
+            Self::Snapshot { with_commands } | Self::Record { with_commands, .. } => {
+                Self::command_lines_for(*with_commands)
             }
-            | Self::Completions { .. }
-            | Self::Man => CommandLines::Omit,
+            Self::Completions { .. } | Self::Man | Self::Replay { .. } => CommandLines::Omit,
+        }
+    }
+
+    /// The command-line choice for the `--with-commands` flag.
+    ///
+    /// # Arguments
+    ///
+    /// * `with_commands` - whether the flag was given
+    #[must_use]
+    pub const fn command_lines_for(with_commands: bool) -> CommandLines {
+        if with_commands {
+            CommandLines::Include
+        } else {
+            CommandLines::Omit
         }
     }
 }

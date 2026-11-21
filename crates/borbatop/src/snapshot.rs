@@ -4,7 +4,7 @@ use std::error::Error;
 use std::thread;
 
 use borbatop_core::{Json, Pressure, PressureLine};
-use borbatop_sources::{SystemCollector, list_units};
+use borbatop_sources::{SourceError, SystemCollector, list_units};
 use borbatop_tui::{Model, ProcessRow};
 
 use crate::config::Settings;
@@ -35,18 +35,48 @@ pub enum CommandLines {
 ///
 /// Returns the error of the first reading that fails.
 pub fn capture(settings: Settings, commands: CommandLines) -> Result<Json, Box<dyn Error>> {
-    let mut collector = SystemCollector::system()?;
-    let page_size = SystemCollector::page_size()?;
-    let kernel = std::fs::read_to_string(OSRELEASE)
-        .map_or_else(|_| String::new(), |text| text.trim().to_owned());
-    let mut builder = ModelBuilder::new(settings.history_len, page_size, kernel);
-    builder.set_services(list_units().map_err(|error| error.to_string()));
-
-    builder.build(&collector.collect()?);
+    let mut sampler = LiveSampler::new(settings)?;
+    sampler.sample()?;
     thread::sleep(settings.interval);
-    let model = builder.build(&collector.collect()?);
+    let model = sampler.sample()?;
 
     Ok(model_json(&model, commands))
+}
+
+/// Reads the machine and turns each reading into a [`Model`], remembering what the next one needs.
+pub struct LiveSampler {
+    collector: SystemCollector,
+    builder: ModelBuilder,
+}
+
+impl LiveSampler {
+    /// Prepares the collectors and loads the unit list.
+    ///
+    /// # Arguments
+    ///
+    /// * `settings` - history length used for sparklines
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of the first source that cannot be set up.
+    pub fn new(settings: Settings) -> Result<Self, SourceError> {
+        let collector = SystemCollector::system()?;
+        let page_size = SystemCollector::page_size()?;
+        let kernel = std::fs::read_to_string(OSRELEASE)
+            .map_or_else(|_| String::new(), |text| text.trim().to_owned());
+        let mut builder = ModelBuilder::new(settings.history_len, page_size, kernel);
+        builder.set_services(list_units().map_err(|error| error.to_string()));
+        Ok(Self { collector, builder })
+    }
+
+    /// Reads the machine once and builds the model; usage reads zero on the first call.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of the reading that fails.
+    pub fn sample(&mut self) -> Result<Model, SourceError> {
+        Ok(self.builder.build(&self.collector.collect()?))
+    }
 }
 
 /// The JSON form of one sample.
@@ -59,6 +89,10 @@ pub fn capture(settings: Settings, commands: CommandLines) -> Result<Json, Box<d
 pub fn model_json(model: &Model, commands: CommandLines) -> Json {
     Json::object([
         ("kernel", Json::text(&model.kernel_release)),
+        (
+            "cpu_permille",
+            Json::Unsigned(model.cpu_history.iter().next_back().copied().unwrap_or(0)),
+        ),
         ("uptime_seconds", seconds(model)),
         ("load", load_json(model)),
         ("cores_permille", permilles(model)),
@@ -163,6 +197,10 @@ fn process_json(process: &ProcessRow, commands: CommandLines) -> Json {
             Json::Unsigned(u64::from(process.pid.get())),
         ),
         (
+            "start_time".to_owned(),
+            Json::Unsigned(process.start_time.get()),
+        ),
+        (
             "parent".to_owned(),
             Json::Unsigned(u64::from(process.parent.get())),
         ),
@@ -210,6 +248,7 @@ fn services_json(model: &Model) -> Json {
                         ("name", Json::text(unit.name())),
                         ("active", Json::text(unit.active().name())),
                         ("sub", Json::text(unit.sub())),
+                        ("description", Json::text(unit.description())),
                     ])
                 })
                 .collect(),
@@ -330,7 +369,9 @@ mod tests {
     #[test]
     fn top_level_fields_and_nulls_for_missing_readings() {
         let text = model_json(&model_with(Vec::new()), CommandLines::Omit).render();
-        assert!(text.starts_with(r#"{"kernel":"7.2.1-arch1","uptime_seconds":90,"load":null,"#));
+        assert!(text.starts_with(
+            r#"{"kernel":"7.2.1-arch1","cpu_permille":0,"uptime_seconds":90,"load":null,"#
+        ));
         assert!(text.contains(r#""memory":null"#));
         assert!(text.contains(r#""services":null"#));
         assert!(text.contains(r#""processes":[]"#));

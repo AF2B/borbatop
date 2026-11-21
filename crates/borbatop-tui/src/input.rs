@@ -11,6 +11,10 @@ pub enum Key {
     Up,
     /// Arrow down.
     Down,
+    /// Arrow left.
+    Left,
+    /// Arrow right.
+    Right,
     /// Page up.
     PageUp,
     /// Page down.
@@ -243,11 +247,22 @@ impl ServiceAction {
     }
 }
 
+/// Which way to move through a recording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Seek {
+    /// One sample back.
+    Backward,
+    /// One sample forward.
+    Forward,
+}
+
 /// What the screen asks the program to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Leave the program.
     Quit,
+    /// Step through a recording; ignored while showing live data.
+    Seek(Seek),
     /// Deliver a signal to a process.
     SendSignal {
         /// Process to signal: PID plus start time, so a reused PID is never hit.

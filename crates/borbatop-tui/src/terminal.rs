@@ -44,6 +44,8 @@ pub fn key_from_event(event: KeyEvent) -> Option<Key> {
         KeyCode::Char(character) => Some(Key::Char(character)),
         KeyCode::Up => Some(Key::Up),
         KeyCode::Down => Some(Key::Down),
+        KeyCode::Left => Some(Key::Left),
+        KeyCode::Right => Some(Key::Right),
         KeyCode::PageUp => Some(Key::PageUp),
         KeyCode::PageDown => Some(Key::PageDown),
         KeyCode::Home => Some(Key::Home),

@@ -17,7 +17,7 @@ mod widgets;
 pub use alerts::{Alert, AlertKind, AlertThresholds, evaluate};
 pub use app::{App, MessageKind, UiConfig};
 pub use draw::{WORDMARK, draw};
-pub use input::{Command, Key, ServiceAction, SignalChoice, SortKey, Tab};
+pub use input::{Command, Key, Seek, ServiceAction, SignalChoice, SortKey, Tab};
 pub use model::{
     AurView, DiskRow, KernelView, Model, MountRow, NetRow, PacmanView, PressureView, ProcessRow,
     Report, ReportLine, ReportTone, StaleView,

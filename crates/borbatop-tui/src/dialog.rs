@@ -176,6 +176,8 @@ fn step(selected: usize, key: Key, last: usize) -> usize {
         Key::Char(_)
         | Key::PageUp
         | Key::PageDown
+        | Key::Left
+        | Key::Right
         | Key::Enter
         | Key::Escape
         | Key::Backspace
@@ -252,7 +254,13 @@ impl NiceDialog {
                     nice: self.chosen,
                 });
             }
-            Key::Char(_) | Key::Escape | Key::Backspace | Key::Tab | Key::BackTab => 0,
+            Key::Char(_)
+            | Key::Left
+            | Key::Right
+            | Key::Escape
+            | Key::Backspace
+            | Key::Tab
+            | Key::BackTab => 0,
         };
         self.chosen = Nice::clamped(self.chosen.get().saturating_add(delta));
         DialogOutcome::Open
@@ -317,6 +325,8 @@ impl AffinityDialog {
             | Key::Down
             | Key::PageUp
             | Key::PageDown
+            | Key::Left
+            | Key::Right
             | Key::Home
             | Key::End
             | Key::Escape
