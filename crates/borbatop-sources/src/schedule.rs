@@ -283,6 +283,9 @@ mod tests {
             Err(ScheduleError::InvalidPid(_))
         ));
 
+        if crate::identity::running_as_root() {
+            return; // root may renice init
+        }
         let init = current_identity(Pid::new(1)).unwrap();
         assert!(matches!(
             set_nice(init, Nice::clamped(1)),

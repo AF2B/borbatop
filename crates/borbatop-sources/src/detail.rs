@@ -311,16 +311,9 @@ mod tests {
         let init = current_identity(Pid::new(1)).unwrap();
         let detail = process_detail(init).unwrap();
         // pid 1 belongs to root: descriptors and exe are unreadable for a normal user.
-        if !rustix_is_root() {
+        if !crate::identity::running_as_root() {
             assert!(detail.descriptors().is_err());
             assert_eq!(detail.sockets(), []);
         }
-    }
-
-    fn rustix_is_root() -> bool {
-        fs::read_to_string("/proc/self/status")
-            .unwrap()
-            .lines()
-            .any(|line| line.starts_with("Uid:\t0\t"))
     }
 }

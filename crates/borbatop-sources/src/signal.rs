@@ -147,6 +147,9 @@ mod tests {
 
     #[test]
     fn init_belongs_to_root() {
+        if crate::identity::running_as_root() {
+            return; // root may signal init
+        }
         let result = send_signal(identity_of(1), Signal::Hangup);
         assert!(matches!(result, Err(SignalError::NotPermitted)));
     }

@@ -17,6 +17,14 @@ pub(crate) enum IdentityError {
     Unreadable(io::Error),
 }
 
+/// Whether the test run has root's privileges (a CI container usually does): tests about what
+/// an unprivileged user may not do must be skipped then.
+#[cfg(test)]
+pub(crate) fn running_as_root() -> bool {
+    fs::read_to_string("/proc/self/status")
+        .is_ok_and(|status| status.lines().any(|line| line.starts_with("Uid:\t0\t")))
+}
+
 /// Identity (PID plus start time) of whatever process currently holds `pid`.
 ///
 /// # Arguments
