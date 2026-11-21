@@ -2,6 +2,8 @@
 
 A native Linux task manager for the terminal, made for Arch and Arch-based distributions.
 
+Website: <https://af2b.github.io/borbatop/>
+
 One screen for processes, systemd services, pacman, sockets, boot time, the system journal, GPUs and containers. It reads `/proc`, `/sys` and cgroup v2 directly: no daemon, no GUI, no async runtime. One Rust binary.
 
 ## What it shows
