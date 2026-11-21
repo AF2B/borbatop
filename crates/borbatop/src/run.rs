@@ -2,13 +2,13 @@
 
 use std::io;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use borbatop_core::{Nice, Pid, ProcessId};
 use borbatop_sources::{ScheduleError, send_signal, set_affinity, set_nice};
 use borbatop_tui::{
-    App, Command, MessageKind, Model, Seek, SignalChoice, UiConfig, draw, is_interrupt,
-    key_from_event, mouse_from_event,
+    App, Command, ExportRequest, MessageKind, Model, Seek, SignalChoice, UiConfig, draw,
+    is_interrupt, key_from_event, mouse_from_event,
 };
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
@@ -16,6 +16,7 @@ use ratatui::crossterm::execute;
 
 use crate::config::Settings;
 use crate::convert::{signal_of, unit_action_of};
+use crate::export::write_export;
 use crate::reports::ProcessUsage;
 use crate::worker::{
     WorkerEvent, spawn_detail, spawn_logs, spawn_pacman, spawn_report, spawn_sampler,
@@ -216,7 +217,10 @@ fn dispatch(
     match command {
         Command::Quit => return false,
         Command::Seek(direction) => replay.seek(direction, app),
-        Command::LoadReport(_) | Command::RefreshPacman | Command::LoadLogs { .. } => {
+        Command::LoadReport(_)
+        | Command::RefreshPacman
+        | Command::LoadLogs { .. }
+        | Command::Export(_) => {
             return execute(command, app, events);
         }
         Command::SendSignal { .. }
@@ -244,6 +248,7 @@ fn execute(command: Command, app: &mut App, events: &Sender<WorkerEvent>) -> boo
             let started = spawn_unit_action(events.clone(), unit, unit_action_of(action));
             report_start(app, "start systemctl", started);
         }
+        Command::Export(request) => export(app, &request),
         Command::LoadDetail { id, label } => {
             report_start(
                 app,
@@ -264,6 +269,20 @@ fn execute(command: Command, app: &mut App, events: &Sender<WorkerEvent>) -> boo
         }
     }
     true
+}
+
+/// Writes the tab being shown to a JSON file in the current directory and says where it went.
+fn export(app: &mut App, request: &ExportRequest) {
+    let written = std::env::current_dir()
+        .map_err(|error| format!("cannot find the current directory: {error}"))
+        .and_then(|directory| {
+            write_export(&directory, request, app.model(), SystemTime::now())
+                .map_err(|error| error.to_string())
+        });
+    match written {
+        Ok(path) => app.notify(format!("exported to {}", path.display()), MessageKind::Info),
+        Err(reason) => app.notify(format!("export failed: {reason}"), MessageKind::Error),
+    }
 }
 
 /// Tells the person when a background thread could not be started.

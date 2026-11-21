@@ -8,7 +8,7 @@ use borbatop_core::{ActiveState, Pid, ProcessId, UnitRow, order_as_tree};
 
 use crate::alerts::{Alert, AlertThresholds, evaluate};
 use crate::dialog::{Dialog, DialogOutcome};
-use crate::input::{Command, Key, Seek, SortKey, Tab};
+use crate::input::{Command, ExportContent, ExportOrder, ExportRequest, Key, Seek, SortKey, Tab};
 use crate::model::{Model, PacmanView, ProcessRow, Report, ReportLine, ReportTone};
 use crate::mouse::{HitMap, Mouse};
 use crate::theme::ThemeKind;
@@ -626,6 +626,7 @@ impl App {
             'a' => self.open_service_dialog(),
             'R' => self.request_reload(),
             'l' => self.request_logs(),
+            'e' => self.request_export(),
             digit => {
                 let position = digit
                     .to_digit(10)
@@ -674,6 +675,66 @@ impl App {
         }
         self.pacman = PacmanState::Loading;
         Some(Command::RefreshPacman)
+    }
+
+    /// Asks to write the tab being shown to a file, exactly as it is filtered and ordered.
+    ///
+    /// A tab whose report has not arrived yet is not exported: the person is told to wait.
+    fn request_export(&mut self) -> Option<Command> {
+        let content = match self.tab {
+            Tab::Processes => ExportContent::Processes(
+                self.visible_processes()
+                    .iter()
+                    .filter_map(|row| self.model.processes.get(row.index))
+                    .map(|process| process.pid)
+                    .collect(),
+            ),
+            Tab::Services => match &self.model.services {
+                Ok(_) => ExportContent::Services(
+                    self.visible_units()
+                        .iter()
+                        .map(|unit| unit.name().to_owned())
+                        .collect(),
+                ),
+                Err(reason) => {
+                    let text = format!("nothing to export: {reason}");
+                    self.notify(text, MessageKind::Error);
+                    return None;
+                }
+            },
+            Tab::Io => ExportContent::Io,
+            Tab::Pacman => match &self.pacman {
+                PacmanState::Loaded(view) => ExportContent::Pacman(view.clone()),
+                PacmanState::NotRequested | PacmanState::Loading => {
+                    return self.not_ready_to_export();
+                }
+            },
+            Tab::Connections | Tab::Boot | Tab::Logs | Tab::Gpu | Tab::Containers => {
+                match self.reports.get(&self.tab) {
+                    Some(Fetch::Loaded(report)) => ExportContent::Report(report.clone()),
+                    Some(Fetch::Loading) | None => return self.not_ready_to_export(),
+                }
+            }
+        };
+        let order = (self.tab == Tab::Processes).then_some(ExportOrder {
+            column: self.sort,
+            descending: self.descending,
+            tree: self.layout == ProcessLayout::Tree,
+        });
+        Some(Command::Export(Box::new(ExportRequest {
+            tab: self.tab,
+            filter: self.filter.trim().to_owned(),
+            order,
+            content,
+        })))
+    }
+
+    fn not_ready_to_export(&mut self) -> Option<Command> {
+        self.notify(
+            "nothing to export yet: wait for this tab to finish loading",
+            MessageKind::Error,
+        );
+        None
     }
 
     /// Asks for everything known about the selected process.
@@ -1066,6 +1127,117 @@ mod tests {
         assert_eq!(pids(&app), [1, 2, 3]);
         app.handle_key(Key::Char('s')); // command, ascending
         assert_eq!(pids(&app), [1, 2, 3]);
+    }
+
+    fn exported(app: &mut App) -> ExportRequest {
+        app.handle_key(Key::Char('e'))
+            .and_then(|command| match command {
+                Command::Export(request) => Some(*request),
+                Command::Quit
+                | Command::Seek(_)
+                | Command::SendSignal { .. }
+                | Command::SetNice { .. }
+                | Command::SetAffinity { .. }
+                | Command::ControlUnit { .. }
+                | Command::LoadDetail { .. }
+                | Command::LoadReport(_)
+                | Command::RefreshPacman
+                | Command::LoadLogs { .. } => None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn export_carries_what_the_person_sees_filter_order_and_rows() {
+        let mut app = app_with(vec![
+            row(1, 0, 10, "alpha"),
+            row(2, 0, 900, "zeta"),
+            row(3, 0, 50, "zebra"),
+        ]);
+        app.handle_key(Key::Char('/'));
+        for character in "ze".chars() {
+            app.handle_key(Key::Char(character));
+        }
+        app.handle_key(Key::Enter);
+
+        let request = exported(&mut app);
+
+        assert_eq!(request.tab, Tab::Processes);
+        assert_eq!(request.filter, "ze");
+        assert_eq!(
+            request.order,
+            Some(ExportOrder {
+                column: SortKey::Cpu,
+                descending: true,
+                tree: false,
+            })
+        );
+        assert_eq!(
+            request.content,
+            ExportContent::Processes(vec![Pid::new(2), Pid::new(3)]),
+            "only the rows that pass the filter, biggest cpu first"
+        );
+    }
+
+    #[test]
+    fn typing_e_in_the_filter_prompt_is_just_a_letter() {
+        let mut app = app_with(vec![row(1, 0, 10, "alpha")]);
+        app.handle_key(Key::Char('/'));
+        assert_eq!(app.handle_key(Key::Char('e')), None);
+        assert_eq!(app.filter, "e");
+    }
+
+    #[test]
+    fn tabs_that_are_not_ready_refuse_to_export_and_say_why() {
+        let mut app = app_with(vec![]);
+        app.handle_key(Key::Char('3')); // pacman, still loading
+        assert_eq!(app.handle_key(Key::Char('e')), None);
+        assert!(app.message.as_ref().unwrap().text.contains("wait"));
+
+        app.handle_key(Key::Char('5')); // connections, still loading
+        app.message = None;
+        assert_eq!(app.handle_key(Key::Char('e')), None);
+        assert_eq!(app.message.as_ref().unwrap().kind, MessageKind::Error);
+    }
+
+    #[test]
+    fn a_loaded_report_and_the_io_tab_export() {
+        let mut app = app_with(vec![]);
+        app.handle_key(Key::Char('7'));
+        app.set_report(
+            Tab::Logs,
+            Ok(Report {
+                lines: vec![ReportLine::new("kernel: bad", ReportTone::Bad)],
+            }),
+        );
+        let logs = exported(&mut app);
+        assert_eq!(logs.tab, Tab::Logs);
+        assert_eq!(logs.order, None);
+        assert!(
+            matches!(logs.content, ExportContent::Report(ref report) if report.lines.len() == 1)
+        );
+
+        app.handle_key(Key::Char('4'));
+        assert_eq!(exported(&mut app).content, ExportContent::Io);
+    }
+
+    #[test]
+    fn services_export_the_filtered_names_and_refuse_when_systemd_failed() {
+        let mut app = app_with(vec![]);
+        app.handle_key(Key::Char('2'));
+        assert_eq!(app.handle_key(Key::Char('e')), None, "no systemd data yet");
+
+        let mut model = Model::empty(4);
+        model.services = Ok(parse_systemctl_units(
+            "b.service loaded active running B\nz.service loaded failed failed Z\n",
+        ));
+        app.apply_model(model);
+        let request = exported(&mut app);
+        assert_eq!(
+            request.content,
+            ExportContent::Services(vec!["z.service".to_owned(), "b.service".to_owned()]),
+            "failed units first, as on screen"
+        );
     }
 
     #[test]

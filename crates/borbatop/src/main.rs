@@ -3,6 +3,7 @@
 mod cli;
 mod config;
 mod convert;
+mod export;
 mod model;
 mod recording;
 mod reports;

@@ -4,6 +4,7 @@
 //! be tested without a Linux machine.
 
 mod bytes;
+mod clock;
 mod containers;
 mod cpu;
 mod decimal;
@@ -20,6 +21,7 @@ mod startup;
 mod tree;
 
 pub use bytes::{Bytes, PageSize, ZeroPageSize};
+pub use clock::UtcDateTime;
 pub use containers::{ContainerInfo, container_id_of_unit, parse_container_list, same_container};
 pub use cpu::{
     CpuSnapshot, CpuStatError, CpuTicks, CpuTimes, ElapsedTicks, Permille, SampleError, SamplePair,
