@@ -1087,6 +1087,7 @@ fn hints_for(tab: Tab) -> &'static [(&'static str, &'static str)] {
             ("K", "signal"),
             ("n", "nice"),
             ("c", "cpus"),
+            ("e", "export"),
             ("p", "pkg"),
             ("␣", "pause"),
             ("q", "quit"),
@@ -1096,14 +1097,22 @@ fn hints_for(tab: Tab) -> &'static [(&'static str, &'static str)] {
             ("/", "filter"),
             ("l", "logs"),
             ("a", "action"),
+            ("e", "export"),
             ("␣", "pause"),
             ("q", "quit"),
         ],
-        Tab::Pacman => &[("↑↓", "scroll"), ("R", "refresh"), ("q", "quit")],
-        Tab::Io => &[("↑↓", "scroll"), ("␣", "pause"), ("q", "quit")],
-        Tab::Connections | Tab::Boot | Tab::Logs | Tab::Gpu | Tab::Containers => {
-            &[("↑↓", "scroll"), ("R", "refresh"), ("q", "quit")]
-        }
+        Tab::Io => &[
+            ("↑↓", "scroll"),
+            ("e", "export"),
+            ("␣", "pause"),
+            ("q", "quit"),
+        ],
+        Tab::Pacman | Tab::Connections | Tab::Boot | Tab::Logs | Tab::Gpu | Tab::Containers => &[
+            ("↑↓", "scroll"),
+            ("R", "refresh"),
+            ("e", "export"),
+            ("q", "quit"),
+        ],
     }
 }
 

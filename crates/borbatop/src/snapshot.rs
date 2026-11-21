@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::thread;
 
-use borbatop_core::{Json, Pressure, PressureLine};
+use borbatop_core::{Json, Pressure, PressureLine, UnitRow};
 use borbatop_sources::{SourceError, SystemCollector, list_units};
 use borbatop_tui::{Model, ProcessRow};
 
@@ -190,7 +190,7 @@ fn pressure_line_json(line: PressureLine) -> Json {
     ])
 }
 
-fn process_json(process: &ProcessRow, commands: CommandLines) -> Json {
+pub(crate) fn process_json(process: &ProcessRow, commands: CommandLines) -> Json {
     let mut fields = vec![
         (
             "pid".to_owned(),
@@ -240,24 +240,21 @@ fn process_json(process: &ProcessRow, commands: CommandLines) -> Json {
 
 fn services_json(model: &Model) -> Json {
     match &model.services {
-        Ok(list) => Json::Array(
-            list.units()
-                .iter()
-                .map(|unit| {
-                    Json::object([
-                        ("name", Json::text(unit.name())),
-                        ("active", Json::text(unit.active().name())),
-                        ("sub", Json::text(unit.sub())),
-                        ("description", Json::text(unit.description())),
-                    ])
-                })
-                .collect(),
-        ),
+        Ok(list) => Json::Array(list.units().iter().map(unit_json).collect()),
         Err(_reason) => Json::Null,
     }
 }
 
-fn network_json(model: &Model) -> Json {
+pub(crate) fn unit_json(unit: &UnitRow) -> Json {
+    Json::object([
+        ("name", Json::text(unit.name())),
+        ("active", Json::text(unit.active().name())),
+        ("sub", Json::text(unit.sub())),
+        ("description", Json::text(unit.description())),
+    ])
+}
+
+pub(crate) fn network_json(model: &Model) -> Json {
     Json::Array(
         model
             .network
@@ -279,7 +276,7 @@ fn network_json(model: &Model) -> Json {
     )
 }
 
-fn disks_json(model: &Model) -> Json {
+pub(crate) fn disks_json(model: &Model) -> Json {
     Json::Array(
         model
             .disks
@@ -301,7 +298,7 @@ fn disks_json(model: &Model) -> Json {
     )
 }
 
-fn mounts_json(model: &Model) -> Json {
+pub(crate) fn mounts_json(model: &Model) -> Json {
     Json::Array(
         model
             .mounts

@@ -1,6 +1,8 @@
 //! What the person can press, and what the screen asks the program to do about it.
 
-use borbatop_core::{Nice, ProcessId};
+use borbatop_core::{Nice, Pid, ProcessId};
+
+use crate::model::{PacmanView, Report};
 
 /// A key press, independent of any terminal library.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +96,22 @@ impl Tab {
         match self {
             Self::Connections | Self::Boot | Self::Logs | Self::Gpu | Self::Containers => true,
             Self::Processes | Self::Services | Self::Pacman | Self::Io => false,
+        }
+    }
+
+    /// Lower-case name for file names (`network-disk`).
+    #[must_use]
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::Processes => "processes",
+            Self::Services => "services",
+            Self::Pacman => "pacman",
+            Self::Io => "network-disk",
+            Self::Connections => "connections",
+            Self::Boot => "boot",
+            Self::Logs => "logs",
+            Self::Gpu => "gpu",
+            Self::Containers => "containers",
         }
     }
 
@@ -256,6 +274,45 @@ pub enum Seek {
     Forward,
 }
 
+/// How the process table was ordered when it was exported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExportOrder {
+    /// Column the table was sorted by.
+    pub column: SortKey,
+    /// Largest value first.
+    pub descending: bool,
+    /// Rows were arranged as a tree, so the column did not apply.
+    pub tree: bool,
+}
+
+/// What one tab holds, as the person was seeing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportContent {
+    /// Processes that passed the filter, in display order.
+    Processes(Vec<Pid>),
+    /// Units that passed the filter, in display order.
+    Services(Vec<String>),
+    /// The Pacman report.
+    Pacman(Box<PacmanView>),
+    /// Network, disks and mounts of the current sample.
+    Io,
+    /// The report of an on-demand tab.
+    Report(Report),
+}
+
+/// What to write when the person asks to export the tab being shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportRequest {
+    /// The tab being exported.
+    pub tab: Tab,
+    /// Filter text in effect, empty when none.
+    pub filter: String,
+    /// Ordering of the process table; `None` on other tabs.
+    pub order: Option<ExportOrder>,
+    /// The content itself.
+    pub content: ExportContent,
+}
+
 /// What the screen asks the program to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -291,6 +348,8 @@ pub enum Command {
         /// What to do.
         action: ServiceAction,
     },
+    /// Write the tab being shown to a JSON file.
+    Export(Box<ExportRequest>),
     /// Show everything known about one process.
     LoadDetail {
         /// Process to inspect: PID plus start time.
