@@ -137,7 +137,7 @@ fn deliver(app: &mut App, id: ProcessId, choice: SignalChoice) {
 }
 
 /// The program name in a command line: its first word, without directories.
-fn process_name(command: &str) -> String {
+pub(crate) fn process_name(command: &str) -> String {
     let program = command.split_whitespace().next().unwrap_or(command);
     program.rsplit('/').next().unwrap_or(program).to_owned()
 }

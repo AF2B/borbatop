@@ -8,6 +8,7 @@ mod cpu;
 mod decimal;
 mod identity;
 mod io_stats;
+mod json;
 mod memory;
 mod process;
 mod services;
@@ -24,6 +25,7 @@ pub use io_stats::{
     BytesPerSecond, DiskCounters, IoStatsError, Mount, NetCounters, bytes_per_second,
     parse_diskstats, parse_mounts, parse_net_dev,
 };
+pub use json::Json;
 pub use memory::{
     LoadAvg, MemField, MemInfo, MemInfoError, MilliCelsius, Pressure, PressureLine, ProcTextError,
     parse_loadavg, parse_meminfo, parse_millicelsius, parse_pressure, parse_uptime,

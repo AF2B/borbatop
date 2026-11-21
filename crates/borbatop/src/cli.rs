@@ -7,6 +7,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
 use crate::config::{Overrides, ThemeName};
+use crate::snapshot::CommandLines;
 
 const BINARY_NAME: &str = "borbatop";
 
@@ -50,6 +51,29 @@ pub enum Extra {
     },
     /// Print the manual page (roff) to standard output.
     Man,
+    /// Take one sample, print it as JSON and exit. Meant for scripts and cron jobs.
+    Snapshot {
+        /// Include full command lines (they may contain secrets).
+        #[arg(long)]
+        with_commands: bool,
+    },
+}
+
+impl Extra {
+    /// Whether a snapshot includes command lines; commands that print no snapshot omit them.
+    #[must_use]
+    pub const fn command_lines(&self) -> CommandLines {
+        match self {
+            Self::Snapshot {
+                with_commands: true,
+            } => CommandLines::Include,
+            Self::Snapshot {
+                with_commands: false,
+            }
+            | Self::Completions { .. }
+            | Self::Man => CommandLines::Omit,
+        }
+    }
 }
 
 impl Cli {
@@ -109,6 +133,19 @@ mod tests {
                 hide_package: true,
             }
         );
+    }
+
+    #[test]
+    fn snapshot_subcommand_and_command_lines() {
+        let plain = parse(&["snapshot"]).unwrap();
+        let plain = plain.command.unwrap();
+        assert!(matches!(plain, Extra::Snapshot { .. }));
+        assert_eq!(plain.command_lines(), CommandLines::Omit);
+
+        let with = parse(&["snapshot", "--with-commands"]).unwrap();
+        assert_eq!(with.command.unwrap().command_lines(), CommandLines::Include);
+
+        assert!(parse(&["--with-commands"]).is_err());
     }
 
     #[test]

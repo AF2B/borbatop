@@ -5,10 +5,11 @@ mod config;
 mod convert;
 mod model;
 mod run;
+mod snapshot;
 mod worker;
 
 use std::error::Error;
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -35,7 +36,7 @@ fn start() -> Result<(), Box<dyn Error>> {
             return Ok(());
         }
         Some(Extra::Man) => return Ok(write_man_page(&mut io::stdout())?),
-        None => {}
+        Some(Extra::Snapshot { .. }) | None => {}
     }
 
     let path = cli.config.clone().or_else(|| {
@@ -48,6 +49,12 @@ fn start() -> Result<(), Box<dyn Error>> {
         None => FileConfig::default(),
     };
     let settings = Settings::resolve(&file, cli.overrides())?;
+
+    if let Some(snapshot_command @ Extra::Snapshot { .. }) = &cli.command {
+        let json = snapshot::capture(settings, snapshot_command.command_lines())?;
+        writeln!(io::stdout(), "{}", json.render())?;
+        return Ok(());
+    }
 
     if !io::stdout().is_terminal() {
         return Err("needs an interactive terminal: standard output is not a terminal".into());
