@@ -188,6 +188,7 @@ mod tests {
             theme: ThemeKind::Borba,
             tree: false,
             show_package: true,
+            mouse: true,
             history_len: 8,
             alerts: borbatop_tui::AlertThresholds::default(),
         }

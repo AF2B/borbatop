@@ -97,6 +97,9 @@ pub enum SortKey {
 }
 
 impl SortKey {
+    /// Number of sortable columns.
+    pub const COUNT: usize = 4;
+
     /// The next column in the cycle.
     #[must_use]
     pub const fn next(self) -> Self {

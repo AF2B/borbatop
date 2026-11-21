@@ -13,6 +13,7 @@ use crate::app::{
 use crate::dialog::{Dialog, Tone};
 use crate::input::{SortKey, Tab};
 use crate::model::{Model, PacmanView, ProcessRow};
+use crate::mouse::{HitMap, ListRows, Run};
 use crate::theme::Theme;
 use crate::widgets::{Heat, bar_text, fit, fit_right, heat_of, safe, scale_of, sparkline};
 
@@ -50,6 +51,8 @@ const INTERFACE_WIDTH: usize = 12;
 const RATE_WIDTH: usize = 10;
 const HEADER_INFO_WIDTH: u16 = 48;
 const HEADER_LOGO_WIDTH: u16 = 24;
+const COMMAND_TITLE_WIDTH: usize = 8;
+const SEPARATOR_WIDTH: usize = 1;
 const ALERT_MARK: &str = "⚠ ";
 const ALERT_SEPARATOR: &str = " · ";
 const JOURNAL_MARGIN_X: u16 = 4;
@@ -108,6 +111,7 @@ impl Styles {
 pub fn draw(frame: &mut Frame, app: &App) {
     let styles = Styles::of(Theme::of(app.config.theme));
     frame.render_widget(Block::new().style(styles.base), frame.area());
+    *app.hits.borrow_mut() = HitMap::default();
 
     let top_height = top_height(&app.model);
     let [header, top, tabs, body, status] = Layout::vertical([
@@ -374,9 +378,28 @@ fn usage_line<'a>(
     ])
 }
 
+fn to_u16(value: usize) -> u16 {
+    u16::try_from(value).unwrap_or(u16::MAX)
+}
+
 fn draw_tabs(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
     let mut spans = Vec::with_capacity(Tab::ALL.len().saturating_mul(3));
+    let mut hits = app.hits.borrow_mut();
+    hits.tab_row = area.y;
+    let mut column = area.x;
     for tab in Tab::ALL {
+        let number = format!(" {}", tab.index().saturating_add(1));
+        let label = format!(" {} ", tab.label());
+        let end = column.saturating_add(to_u16(
+            number.chars().count().saturating_add(label.chars().count()),
+        ));
+        hits.tabs.push(Run {
+            start: column,
+            end,
+            value: tab,
+        });
+        column = end.saturating_add(to_u16(SEPARATOR_WIDTH));
+
         let selected = tab == app.tab;
         let label_style = if selected {
             styles.strong.add_modifier(Modifier::UNDERLINED)
@@ -405,28 +428,78 @@ fn columns_for(width: usize, show_package: bool) -> Columns {
     }
 }
 
-fn process_header(app: &App, columns: &Columns, styles: &Styles) -> Line<'static> {
-    let arrow = if app.descending { '▼' } else { '▲' };
-    let title = |key: SortKey, text: String| {
-        if app.sort == key {
-            Span::styled(
-                format!("{text}{arrow}"),
-                styles.strong.add_modifier(Modifier::UNDERLINED),
-            )
-        } else {
-            Span::styled(text, styles.accent)
+/// Where each sortable column title sits on the header row, in screen columns.
+fn sortable_runs(columns: &Columns, left: u16) -> Vec<Run<SortKey>> {
+    let mut layout: Vec<(usize, Option<SortKey>)> = vec![
+        (PID_WIDTH, Some(SortKey::Pid)),
+        (SEPARATOR_WIDTH, None),
+        (USER_WIDTH, None),
+        (SEPARATOR_WIDTH, None),
+        (STATE_WIDTH, None),
+        (CPU_WIDTH, Some(SortKey::Cpu)),
+        (SEPARATOR_WIDTH, None),
+        (MEMORY_WIDTH, Some(SortKey::Memory)),
+        (SEPARATOR_WIDTH, None),
+        (THREADS_WIDTH, None),
+        (SEPARATOR_WIDTH, None),
+    ];
+    if columns.unit {
+        layout.push((UNIT_WIDTH.saturating_add(SEPARATOR_WIDTH), None));
+    }
+    if columns.package {
+        layout.push((PACKAGE_WIDTH.saturating_add(SEPARATOR_WIDTH), None));
+    }
+    layout.push((COMMAND_TITLE_WIDTH, Some(SortKey::Command)));
+
+    let mut column = left;
+    let mut runs = Vec::with_capacity(SortKey::COUNT);
+    for (width, key) in layout {
+        let end = column.saturating_add(to_u16(width));
+        if let Some(value) = key {
+            runs.push(Run {
+                start: column,
+                end,
+                value,
+            });
         }
+        column = end;
+    }
+    runs
+}
+
+/// A column title; the sort arrow of the active column takes a padding cell, never a new one,
+/// so the titles stay aligned with the rows below.
+fn sort_title(app: &App, key: SortKey, width: usize, styles: &Styles) -> Span<'static> {
+    let sorted = app.sort == key;
+    let arrow = if app.descending { '▼' } else { '▲' };
+    let text = if sorted {
+        format!("{}{arrow}", key.label())
+    } else {
+        key.label().to_owned()
     };
+    // Text columns hug the left edge, numeric columns the right edge.
+    let cell = match key {
+        SortKey::Command => fit(&text, width),
+        SortKey::Cpu | SortKey::Memory | SortKey::Pid => fit_right(&text, width),
+    };
+    if sorted {
+        Span::styled(cell, styles.strong.add_modifier(Modifier::UNDERLINED))
+    } else {
+        Span::styled(cell, styles.accent)
+    }
+}
+
+fn process_header(app: &App, columns: &Columns, styles: &Styles) -> Line<'static> {
     let label = |text: &str, width: usize| Span::styled(fit(text, width), styles.accent);
     let mut spans = vec![
-        title(SortKey::Pid, fit_right("PID", PID_WIDTH)),
+        sort_title(app, SortKey::Pid, PID_WIDTH, styles),
         Span::raw(" "),
         label("USER", USER_WIDTH),
         Span::raw(" "),
         label("S", STATE_WIDTH),
-        title(SortKey::Cpu, fit_right("CPU%", CPU_WIDTH)),
+        sort_title(app, SortKey::Cpu, CPU_WIDTH, styles),
         Span::raw(" "),
-        title(SortKey::Memory, fit_right("MEM", MEMORY_WIDTH)),
+        sort_title(app, SortKey::Memory, MEMORY_WIDTH, styles),
         Span::raw(" "),
         Span::styled(fit_right("THR", THREADS_WIDTH), styles.accent),
         Span::raw(" "),
@@ -439,7 +512,12 @@ fn process_header(app: &App, columns: &Columns, styles: &Styles) -> Line<'static
         spans.push(label("PKG", PACKAGE_WIDTH));
         spans.push(Span::raw(" "));
     }
-    spans.push(title(SortKey::Command, "COMMAND".to_owned()));
+    spans.push(sort_title(
+        app,
+        SortKey::Command,
+        COMMAND_TITLE_WIDTH,
+        styles,
+    ));
     Line::from(spans)
 }
 
@@ -552,6 +630,16 @@ fn draw_processes(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
             ));
         }
     }
+    {
+        let mut hits = app.hits.borrow_mut();
+        hits.header_row = inner.y;
+        hits.sortable = sortable_runs(&columns, inner.x);
+        hits.list = Some(ListRows {
+            top: inner.y.saturating_add(1),
+            first: start,
+            shown: visible.len().saturating_sub(start).min(rows),
+        });
+    }
     if visible.is_empty() {
         lines.push(Line::styled(
             "no process matches the filter",
@@ -629,6 +717,11 @@ fn draw_services(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
                 .iter()
                 .position(|unit| Some(unit.name()) == app.selected_unit.as_deref());
             let start = window_start(selected, units.len(), rows);
+            app.hits.borrow_mut().list = Some(ListRows {
+                top: inner.y.saturating_add(1),
+                first: start,
+                shown: units.len().saturating_sub(start).min(rows),
+            });
             let mut lines = vec![Line::from(Span::styled(
                 format!(
                     "  {} {} {} DESCRIPTION",
@@ -1066,6 +1159,7 @@ mod tests {
     use crate::app::UiConfig;
     use crate::input::Key;
     use crate::model::{DiskRow, KernelView, MountRow, NetRow, PacmanView, ProcessRow, StaleView};
+    use crate::mouse::Mouse;
 
     fn row(pid: u32, parent: u32, cpu: u64, command: &str) -> ProcessRow {
         let stat = format!("{pid} (x) S {parent} 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 3 0 1 1 1 0");
@@ -1313,6 +1407,128 @@ mod tests {
         for expected in ["SEND SIGNAL", "SIGTERM", "SIGKILL", "end now, no cleanup"] {
             assert!(text.contains(expected), "missing {expected:?}");
         }
+    }
+
+    fn line_text(line: &Line) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn sortable_runs_line_up_with_the_header_text() {
+        let app = app();
+        let styles = Styles::of(Theme::of(app.config.theme));
+        for (unit, package) in [(false, false), (false, true), (true, true)] {
+            let columns = Columns { unit, package };
+            let header: Vec<char> = line_text(&process_header(&app, &columns, &styles))
+                .chars()
+                .collect();
+            for run in sortable_runs(&columns, 0) {
+                let cells: String = header
+                    .get(usize::from(run.start)..usize::from(run.end).min(header.len()))
+                    .unwrap()
+                    .iter()
+                    .collect();
+                assert!(
+                    cells.contains(run.value.label()),
+                    "{:?} not under {cells:?}",
+                    run.value
+                );
+            }
+        }
+    }
+
+    fn click_at(app: &mut App, column: u16, row: u16) -> Option<crate::input::Command> {
+        app.handle_mouse(Mouse::Click { column, row })
+    }
+
+    #[test]
+    fn clicking_a_tab_title_switches_tab() {
+        let mut app = app();
+        screen(&app);
+        let (column, row) = {
+            let hits = app.hits.borrow();
+            (hits.tabs[1].start + 2, hits.tab_row)
+        };
+        click_at(&mut app, column, row);
+        assert_eq!(app.tab(), Tab::Services);
+
+        screen(&app);
+        let (column, row) = {
+            let hits = app.hits.borrow();
+            (hits.tabs[2].start + 1, hits.tab_row)
+        };
+        assert_eq!(
+            click_at(&mut app, column, row),
+            Some(crate::input::Command::RefreshPacman),
+            "opening the Pacman tab for the first time builds its report"
+        );
+    }
+
+    #[test]
+    fn clicking_a_column_title_sorts_and_clicking_again_reverses() {
+        let mut app = app();
+        screen(&app);
+        let (column, row) = {
+            let hits = app.hits.borrow();
+            let memory = hits
+                .sortable
+                .iter()
+                .find(|run| run.value == SortKey::Memory)
+                .unwrap();
+            (memory.start, hits.header_row)
+        };
+
+        click_at(&mut app, column, row);
+        assert_eq!(app.sort, SortKey::Memory);
+        assert!(app.descending);
+
+        screen(&app);
+        click_at(&mut app, column, row);
+        assert!(!app.descending);
+    }
+
+    #[test]
+    fn clicking_a_row_selects_it_and_the_wheel_moves_the_selection() {
+        let mut app = app();
+        screen(&app);
+        let (top, first) = {
+            let list = app.hits.borrow().list.unwrap();
+            (list.top, list.first)
+        };
+        let second = app.visible_processes()[first + 1].index;
+        let expected = app.model.processes[second].pid;
+
+        click_at(&mut app, 3, top + 1);
+        assert_eq!(app.selected_pid, Some(expected));
+
+        let rows = app.visible_processes();
+        let last = rows.len() - 1;
+        let before = app.selected_row_position(&rows).unwrap();
+        app.handle_mouse(Mouse::WheelDown);
+        let after = app.selected_row_position(&app.visible_processes()).unwrap();
+        assert_eq!(after, (before + 3).min(last));
+        app.handle_mouse(Mouse::WheelUp);
+        let back = app.selected_row_position(&app.visible_processes()).unwrap();
+        assert_eq!(back, after.saturating_sub(3));
+    }
+
+    #[test]
+    fn clicks_outside_any_target_and_during_dialogs_do_nothing() {
+        let mut app = app();
+        screen(&app);
+        let before = app.selected_pid;
+        click_at(&mut app, 0, 0);
+        assert_eq!(app.selected_pid, before);
+
+        app.handle_key(Key::Char('K'));
+        assert!(app.dialog.is_some());
+        let row = app.hits.borrow().list.unwrap().top + 1;
+        click_at(&mut app, 3, row);
+        assert_eq!(app.selected_pid, before);
+        assert!(app.dialog.is_some());
     }
 
     #[test]

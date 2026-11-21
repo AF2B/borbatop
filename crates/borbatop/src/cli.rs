@@ -35,6 +35,10 @@ pub struct Cli {
     #[arg(long)]
     pub no_package: bool,
 
+    /// Leave the mouse to the terminal (no clicks or wheel; text selection works).
+    #[arg(long)]
+    pub no_mouse: bool,
+
     /// Extra commands.
     #[command(subcommand)]
     pub command: Option<Extra>,
@@ -85,6 +89,7 @@ impl Cli {
             theme: self.theme,
             tree: self.tree,
             hide_package: self.no_package,
+            no_mouse: self.no_mouse,
         }
     }
 }
@@ -123,7 +128,16 @@ mod tests {
 
     #[test]
     fn flags_become_overrides() {
-        let cli = parse(&["-i", "500", "--theme", "ansi", "--tree", "--no-package"]).unwrap();
+        let cli = parse(&[
+            "-i",
+            "500",
+            "--theme",
+            "ansi",
+            "--tree",
+            "--no-package",
+            "--no-mouse",
+        ])
+        .unwrap();
         assert_eq!(
             cli.overrides(),
             Overrides {
@@ -131,6 +145,7 @@ mod tests {
                 theme: Some(ThemeName::Ansi),
                 tree: true,
                 hide_package: true,
+                no_mouse: true,
             }
         );
     }

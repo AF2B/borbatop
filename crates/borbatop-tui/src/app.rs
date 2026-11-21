@@ -1,6 +1,6 @@
 //! Screen state and key handling: no terminal, no drawing, fully testable.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
@@ -10,6 +10,7 @@ use crate::alerts::{Alert, AlertThresholds, evaluate};
 use crate::dialog::{Dialog, DialogOutcome};
 use crate::input::{Command, Key, SortKey, Tab};
 use crate::model::{Model, PacmanView, ProcessRow};
+use crate::mouse::{HitMap, Mouse};
 use crate::theme::ThemeKind;
 use crate::widgets::safe;
 
@@ -17,6 +18,7 @@ const MESSAGE_TTL_TICKS: u8 = 4;
 const PAGE_ROWS: isize = 10;
 const DEFAULT_HISTORY_LEN: usize = 60;
 const FIRST_TAB_DIGIT: u32 = 1;
+const WHEEL_ROWS: usize = 3;
 
 /// How the screen starts out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +117,25 @@ pub(crate) struct LogView {
     pub(crate) scroll: usize,
 }
 
+/// Everything the filtered, ordered lists depend on; equal keys give equal lists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ListKey {
+    model_version: u64,
+    filter: String,
+    sort: SortKey,
+    descending: bool,
+    layout: ProcessLayout,
+}
+
+/// The lists last computed for a key, so a keypress or a redraw does not refilter everything.
+#[derive(Debug, Default)]
+struct ListCache {
+    key: Option<ListKey>,
+    processes: Vec<VisibleRow>,
+    /// Positions in the model's unit list, in display order.
+    units: Vec<usize>,
+}
+
 /// A process row that survived filtering, in display order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct VisibleRow {
@@ -155,6 +176,13 @@ pub struct App {
     pub(crate) scroll: usize,
     /// Largest useful scroll offset, learned while drawing.
     pub(crate) max_scroll: Cell<usize>,
+    /// What the last frame drew where, so clicks can be resolved.
+    pub(crate) hits: RefCell<HitMap>,
+    /// Bumped whenever the shown model is replaced.
+    model_version: u64,
+    lists: RefCell<ListCache>,
+    #[cfg(test)]
+    pub(crate) list_computations: Cell<usize>,
 }
 
 impl App {
@@ -193,6 +221,11 @@ impl App {
             pacman: PacmanState::NotRequested,
             scroll: 0,
             max_scroll: Cell::new(0),
+            hits: RefCell::new(HitMap::default()),
+            model_version: 0,
+            lists: RefCell::new(ListCache::default()),
+            #[cfg(test)]
+            list_computations: Cell::new(0),
         }
     }
 
@@ -204,6 +237,7 @@ impl App {
     pub fn apply_model(&mut self, model: Model) {
         if self.playback == Playback::Live {
             self.model = model;
+            self.model_version = self.model_version.wrapping_add(1);
             self.refresh_alerts();
         }
         self.ensure_selection();
@@ -358,6 +392,97 @@ impl App {
                 None
             }
             Key::Enter | Key::Backspace => None,
+        }
+    }
+
+    /// Applies a mouse action and says what, if anything, the program must do.
+    ///
+    /// Clicks are resolved against what the last frame drew: a tab, a column title or a row.
+    /// Dialogs and the filter prompt take no mouse input.
+    ///
+    /// # Arguments
+    ///
+    /// * `mouse` - the mouse action
+    pub fn handle_mouse(&mut self, mouse: Mouse) -> Option<Command> {
+        let command = self.dispatch_mouse(mouse);
+        self.ensure_selection();
+        command
+    }
+
+    fn dispatch_mouse(&mut self, mouse: Mouse) -> Option<Command> {
+        if self.dialog.is_some() || self.input == InputMode::Filtering {
+            return None;
+        }
+        match mouse {
+            Mouse::WheelUp => {
+                self.wheel(Nav::Up, Key::Up);
+                None
+            }
+            Mouse::WheelDown => {
+                self.wheel(Nav::Down, Key::Down);
+                None
+            }
+            Mouse::Click { column, row } => self.click(column, row),
+        }
+    }
+
+    /// Scrolls the journal when it is open, otherwise moves the selection, a few rows.
+    fn wheel(&mut self, nav: Nav, key: Key) {
+        for _ in 0..WHEEL_ROWS {
+            if self.logs.is_some() {
+                self.handle_logs_key(key);
+            } else {
+                self.navigate(nav);
+            }
+        }
+    }
+
+    fn click(&mut self, column: u16, row: u16) -> Option<Command> {
+        if self.logs.is_some() {
+            return None;
+        }
+        let hits = self.hits.borrow().clone();
+        if let Some(tab) = hits.tab_at(column, row) {
+            return self.select_tab(tab);
+        }
+        if let Some(key) = hits.sort_at(column, row) {
+            self.sort_by(key);
+        } else if let Some(position) = hits.list_position_at(row) {
+            self.select_position(position);
+        }
+        None
+    }
+
+    /// Sorts by `key`; a second request for the same column reverses the order.
+    fn sort_by(&mut self, key: SortKey) {
+        if self.sort == key {
+            self.descending = !self.descending;
+        } else {
+            self.sort = key;
+            self.descending = key.descending_by_default();
+        }
+    }
+
+    /// Selects the row at `position` of the list the current tab shows.
+    fn select_position(&mut self, position: usize) {
+        match self.tab {
+            Tab::Processes => {
+                let rows = self.visible_processes();
+                self.selected_pid = rows
+                    .get(position)
+                    .and_then(|row| self.model.processes.get(row.index))
+                    .map(|process| process.pid);
+            }
+            Tab::Services => {
+                let name = self
+                    .visible_units()
+                    .get(position)
+                    .map(|unit| unit.name().to_owned());
+                if name.is_some() {
+                    self.selected_unit = name;
+                }
+            }
+            Tab::Pacman | Tab::Io => {}
         }
     }
 
@@ -604,8 +729,34 @@ impl App {
         })
     }
 
+    /// Recomputes the filtered lists when anything they depend on changed.
+    fn ensure_lists(&self) {
+        let key = ListKey {
+            model_version: self.model_version,
+            filter: self.filter.clone(),
+            sort: self.sort,
+            descending: self.descending,
+            layout: self.layout,
+        };
+        let mut cache = self.lists.borrow_mut();
+        if cache.key.as_ref() == Some(&key) {
+            return;
+        }
+        #[cfg(test)]
+        self.list_computations
+            .set(self.list_computations.get().saturating_add(1));
+        cache.processes = self.compute_visible_processes();
+        cache.units = self.compute_visible_units();
+        cache.key = Some(key);
+    }
+
     /// Processes that pass the filter, in display order (tree order or sorted).
     pub(crate) fn visible_processes(&self) -> Vec<VisibleRow> {
+        self.ensure_lists();
+        self.lists.borrow().processes.clone()
+    }
+
+    fn compute_visible_processes(&self) -> Vec<VisibleRow> {
         let needle = self.filter.trim().to_lowercase();
         let matching: HashSet<usize> = self
             .model
@@ -664,21 +815,35 @@ impl App {
 
     /// Units that pass the filter, failed ones first.
     pub(crate) fn visible_units(&self) -> Vec<&UnitRow> {
+        self.ensure_lists();
+        let Ok(list) = &self.model.services else {
+            return Vec::new();
+        };
+        self.lists
+            .borrow()
+            .units
+            .iter()
+            .filter_map(|&position| list.units().get(position))
+            .collect()
+    }
+
+    fn compute_visible_units(&self) -> Vec<usize> {
         let Ok(list) = &self.model.services else {
             return Vec::new();
         };
         let needle = self.filter.trim().to_lowercase();
-        let mut units: Vec<&UnitRow> = list
+        let mut units: Vec<(usize, &UnitRow)> = list
             .units()
             .iter()
-            .filter(|unit| {
+            .enumerate()
+            .filter(|(_, unit)| {
                 needle.is_empty()
                     || unit.name().to_lowercase().contains(&needle)
                     || unit.description().to_lowercase().contains(&needle)
             })
             .collect();
-        units.sort_by_key(|unit| (unit.active() != ActiveState::Failed, unit.name().to_owned()));
-        units
+        units.sort_by_key(|(_, unit)| (unit.active() != ActiveState::Failed, unit.name()));
+        units.into_iter().map(|(position, _)| position).collect()
     }
 }
 
@@ -874,6 +1039,43 @@ mod tests {
         app.handle_key(Key::Char('2'));
         app.handle_key(Key::Char('K'));
         assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn lists_are_recomputed_only_when_their_inputs_change() {
+        let mut app = app_with(vec![row(1, 0, 10, "alpha"), row(2, 0, 900, "zeta")]);
+        let baseline = app.list_computations.get();
+
+        for _ in 0..5 {
+            assert_eq!(pids(&app), [2, 1]);
+            app.handle_key(Key::Down);
+            app.handle_key(Key::Up);
+        }
+        assert_eq!(app.list_computations.get(), baseline, "moving is free");
+
+        app.handle_key(Key::Char('r'));
+        assert_eq!(
+            app.list_computations.get(),
+            baseline + 1,
+            "sorting recomputes"
+        );
+        assert_eq!(pids(&app), [1, 2]);
+
+        app.handle_key(Key::Char('/'));
+        for character in "zeta".chars() {
+            app.handle_key(Key::Char(character));
+        }
+        assert_eq!(pids(&app), [2], "the filter recomputes");
+
+        let model = app.model.clone();
+        let before = app.list_computations.get();
+        app.apply_model(model);
+        assert_eq!(pids(&app), [2]);
+        assert_eq!(
+            app.list_computations.get(),
+            before + 1,
+            "a new sample recomputes"
+        );
     }
 
     #[test]

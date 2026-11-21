@@ -13,6 +13,10 @@ tree = false
 # Show the column that names the package owning each executable.
 show_package = true
 
+# Capture the mouse: click tabs, column titles and rows, and scroll with the wheel.
+# Set to false to leave text selection to the terminal (same as --no-mouse).
+mouse = true
+
 # Samples kept for sparklines (8 to 600).
 history = 60
 

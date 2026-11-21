@@ -9,6 +9,7 @@ mod dialog;
 mod draw;
 mod input;
 mod model;
+mod mouse;
 mod terminal;
 mod theme;
 mod widgets;
@@ -20,5 +21,6 @@ pub use input::{Command, Key, ServiceAction, SignalChoice, SortKey, Tab};
 pub use model::{
     DiskRow, KernelView, Model, MountRow, NetRow, PacmanView, PressureView, ProcessRow, StaleView,
 };
-pub use terminal::{is_interrupt, key_from_event};
+pub use mouse::Mouse;
+pub use terminal::{is_interrupt, key_from_event, mouse_from_event};
 pub use theme::{Theme, ThemeKind};

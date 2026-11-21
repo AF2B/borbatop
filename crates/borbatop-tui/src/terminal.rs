@@ -1,8 +1,11 @@
 //! Translation of terminal events into the program's own key type.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
 use crate::input::Key;
+use crate::mouse::Mouse;
 
 /// Whether `event` is Ctrl+C, the universal way out.
 ///
@@ -54,9 +57,68 @@ pub fn key_from_event(event: KeyEvent) -> Option<Key> {
     }
 }
 
+/// The program's [`Mouse`] action for a terminal mouse event, if it means anything.
+///
+/// Only a left-button press and the vertical wheel count; moves, drags and releases do not.
+///
+/// # Arguments
+///
+/// * `event` - mouse event read from the terminal
+#[must_use]
+pub const fn mouse_from_event(event: MouseEvent) -> Option<Mouse> {
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => Some(Mouse::Click {
+            column: event.column,
+            row: event.row,
+        }),
+        MouseEventKind::ScrollUp => Some(Mouse::WheelUp),
+        MouseEventKind::ScrollDown => Some(Mouse::WheelDown),
+        MouseEventKind::Down(MouseButton::Right | MouseButton::Middle)
+        | MouseEventKind::Up(_)
+        | MouseEventKind::Drag(_)
+        | MouseEventKind::Moved
+        | MouseEventKind::ScrollLeft
+        | MouseEventKind::ScrollRight => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mouse(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 4,
+            row: 9,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn left_press_and_wheel_are_the_only_mouse_actions() {
+        assert_eq!(
+            mouse_from_event(mouse(MouseEventKind::Down(MouseButton::Left))),
+            Some(Mouse::Click { column: 4, row: 9 })
+        );
+        assert_eq!(
+            mouse_from_event(mouse(MouseEventKind::ScrollUp)),
+            Some(Mouse::WheelUp)
+        );
+        assert_eq!(
+            mouse_from_event(mouse(MouseEventKind::ScrollDown)),
+            Some(Mouse::WheelDown)
+        );
+        for ignored in [
+            MouseEventKind::Down(MouseButton::Right),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Moved,
+            MouseEventKind::ScrollLeft,
+        ] {
+            assert_eq!(mouse_from_event(mouse(ignored)), None, "{ignored:?}");
+        }
+    }
 
     fn press(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, modifiers)

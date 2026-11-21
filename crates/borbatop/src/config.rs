@@ -56,6 +56,7 @@ pub struct FileConfig {
     theme: Option<ThemeName>,
     tree: Option<bool>,
     show_package: Option<bool>,
+    mouse: Option<bool>,
     history: Option<usize>,
     alerts: Option<AlertsFile>,
 }
@@ -82,6 +83,8 @@ pub struct Overrides {
     pub tree: bool,
     /// `--no-package`.
     pub hide_package: bool,
+    /// `--no-mouse`.
+    pub no_mouse: bool,
 }
 
 /// Validated settings.
@@ -95,6 +98,8 @@ pub struct Settings {
     pub tree: bool,
     /// Show the owning package column.
     pub show_package: bool,
+    /// Capture the mouse (clicks and wheel); off leaves text selection to the terminal.
+    pub mouse: bool,
     /// Samples kept for sparklines.
     pub history_len: usize,
     /// Levels from which a reading raises an alert.
@@ -302,6 +307,7 @@ impl Settings {
                 .map_or(ThemeKind::Borba, ThemeName::kind),
             tree: overrides.tree || file.tree.unwrap_or(false),
             show_package: !overrides.hide_package && file.show_package.unwrap_or(true),
+            mouse: !overrides.no_mouse && file.mouse.unwrap_or(true),
             history_len: usize::try_from(history).unwrap_or(DEFAULT_HISTORY),
         })
     }
@@ -345,6 +351,7 @@ mod tests {
                 theme: Some(ThemeName::Borba),
                 tree: false,
                 hide_package: false,
+                no_mouse: false,
             },
         )
         .unwrap();
@@ -367,6 +374,22 @@ mod tests {
                 .unwrap()
                 .show_package
         );
+    }
+
+    #[test]
+    fn the_mouse_is_captured_unless_the_file_or_the_flag_says_otherwise() {
+        let on = Settings::resolve(&FileConfig::default(), Overrides::default()).unwrap();
+        assert!(on.mouse);
+
+        let off_by_file = Settings::resolve(&file("mouse = false"), Overrides::default()).unwrap();
+        assert!(!off_by_file.mouse);
+
+        let flag = Overrides {
+            no_mouse: true,
+            ..Overrides::default()
+        };
+        let off_by_flag = Settings::resolve(&file("mouse = true"), flag).unwrap();
+        assert!(!off_by_flag.mouse);
     }
 
     #[test]

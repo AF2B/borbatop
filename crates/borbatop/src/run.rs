@@ -8,9 +8,11 @@ use borbatop_core::{Nice, ProcessId};
 use borbatop_sources::{ScheduleError, send_signal, set_affinity, set_nice};
 use borbatop_tui::{
     App, Command, MessageKind, SignalChoice, UiConfig, draw, is_interrupt, key_from_event,
+    mouse_from_event,
 };
 use ratatui::DefaultTerminal;
-use ratatui::crossterm::event::{self, Event};
+use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
+use ratatui::crossterm::execute;
 
 use crate::config::Settings;
 use crate::convert::{signal_of, unit_action_of};
@@ -39,9 +41,27 @@ pub fn run(settings: Settings) -> io::Result<()> {
     });
 
     let mut terminal = ratatui::try_init()?;
-    let result = event_loop(&mut terminal, app, &events, &received);
+    let result = capture_mouse(settings.mouse)
+        .and_then(|()| event_loop(&mut terminal, app, &events, &received));
+    // Best effort: the terminal is being restored, and there is nobody left to tell.
+    let _released = capture_mouse_release(settings.mouse);
     ratatui::restore();
     result
+}
+
+/// Asks the terminal to report clicks and the wheel, when wanted.
+fn capture_mouse(wanted: bool) -> io::Result<()> {
+    if wanted {
+        execute!(io::stdout(), EnableMouseCapture)?;
+    }
+    Ok(())
+}
+
+fn capture_mouse_release(wanted: bool) -> io::Result<()> {
+    if wanted {
+        execute!(io::stdout(), DisableMouseCapture)?;
+    }
+    Ok(())
 }
 
 fn event_loop(
@@ -54,23 +74,24 @@ fn event_loop(
         terminal.draw(|frame| draw(frame, &app))?;
 
         if event::poll(INPUT_POLL)? {
-            match event::read()? {
+            let command = match event::read()? {
                 Event::Key(key) => {
                     if is_interrupt(&key) {
                         return Ok(());
                     }
-                    let command = key_from_event(key).and_then(|key| app.handle_key(key));
-                    if let Some(command) = command
-                        && !execute(command, &mut app, events)
-                    {
-                        return Ok(());
-                    }
+                    key_from_event(key).and_then(|key| app.handle_key(key))
                 }
-                Event::FocusGained
-                | Event::FocusLost
-                | Event::Mouse(_)
-                | Event::Paste(_)
-                | Event::Resize(_, _) => {}
+                Event::Mouse(mouse) => {
+                    mouse_from_event(mouse).and_then(|mouse| app.handle_mouse(mouse))
+                }
+                Event::FocusGained | Event::FocusLost | Event::Paste(_) | Event::Resize(_, _) => {
+                    None
+                }
+            };
+            if let Some(command) = command
+                && !execute(command, &mut app, events)
+            {
+                return Ok(());
             }
         }
 
