@@ -1,58 +1,27 @@
 //! Collector over procfs: one call, one consistent-enough snapshot of every process.
 
-use std::error::Error;
 use std::ffi::OsStr;
-use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use borbatop_core::{
-    CpuSnapshot, CpuStatError, Pid, ProcessSample, StatParseError, parse_cpu_stat,
-    parse_process_stat,
+    CpuSnapshot, Pid, ProcessSample, StatParseError, UserTable, parse_cpu_stat, parse_process_stat,
 };
 
+use crate::error::SourceError;
+use crate::owners::{FileOwners, PACMAN_LOCAL_DB};
+use crate::statics::{ProcessStatics, StaticsResolver};
+
 const SYSTEM_PROC_ROOT: &str = "/proc";
+const PASSWD_FILE: &str = "/etc/passwd";
 const STAT_FILE: &str = "stat";
 const INITIAL_PROCESS_CAPACITY: usize = 512;
 const INITIAL_BUFFER_CAPACITY: usize = 8 * 1024;
 const INITIAL_PATH_CAPACITY: usize = 64;
 /// `errno` the kernel returns when a process exits while its `/proc/[pid]` file is open.
 const ESRCH: i32 = 3;
-
-/// Failure that makes a whole snapshot unusable.
-#[derive(Debug)]
-pub enum SourceError {
-    /// A procfs file or directory could not be read.
-    Io {
-        /// Path that failed.
-        path: PathBuf,
-        /// Underlying OS error.
-        source: io::Error,
-    },
-    /// `/proc/stat` could not be parsed.
-    CpuStat(CpuStatError),
-}
-
-impl fmt::Display for SourceError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io { path, source } => {
-                write!(formatter, "cannot read {}: {source}", path.display())
-            }
-            Self::CpuStat(error) => write!(formatter, "invalid /proc/stat: {error}"),
-        }
-    }
-}
-
-impl Error for SourceError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::CpuStat(error) => Some(error),
-        }
-    }
-}
 
 /// Why one process could not be sampled; the rest of the snapshot is still valid.
 #[derive(Debug)]
@@ -84,10 +53,31 @@ impl ProcessFailure {
     }
 }
 
+/// A sampled process together with the facts that never change during its life.
+#[derive(Debug, Clone)]
+pub struct ProcessRecord {
+    sample: ProcessSample,
+    statics: Arc<ProcessStatics>,
+}
+
+impl ProcessRecord {
+    /// What `/proc/[pid]/stat` said at this sample.
+    #[must_use]
+    pub const fn sample(&self) -> &ProcessSample {
+        &self.sample
+    }
+
+    /// Owner, unit, package and command line.
+    #[must_use]
+    pub fn statics(&self) -> &ProcessStatics {
+        &self.statics
+    }
+}
+
 /// One read of the whole system.
 #[derive(Debug)]
 pub struct Snapshot {
-    processes: Vec<ProcessSample>,
+    processes: Vec<ProcessRecord>,
     failures: Vec<ProcessFailure>,
     vanished: usize,
     cpu: CpuSnapshot,
@@ -96,7 +86,7 @@ pub struct Snapshot {
 impl Snapshot {
     /// Processes sampled successfully.
     #[must_use]
-    pub fn processes(&self) -> &[ProcessSample] {
+    pub fn processes(&self) -> &[ProcessRecord] {
         &self.processes
     }
 
@@ -121,7 +111,7 @@ impl Snapshot {
 
 /// Result of walking the process directories, before it is joined with the CPU counters.
 struct ProcessScan {
-    processes: Vec<ProcessSample>,
+    processes: Vec<ProcessRecord>,
     failures: Vec<ProcessFailure>,
     vanished: usize,
 }
@@ -134,28 +124,56 @@ pub struct ProcCollector {
     buffer: Vec<u8>,
     path: PathBuf,
     process_hint: usize,
+    statics: StaticsResolver,
 }
 
 impl ProcCollector {
-    /// Collector over an arbitrary procfs-shaped directory (tests use a fixture tree).
+    /// Collector over an arbitrary procfs-shaped directory, with no user names or packages
+    /// (tests use a fixture tree).
     ///
     /// # Arguments
     ///
     /// * `root` - directory holding `stat` and one numeric directory per process
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self::with_lookups(root, UserTable::default(), FileOwners::default())
+    }
+
+    /// Collector with user names and package ownership lookups.
+    ///
+    /// # Arguments
+    ///
+    /// * `root` - directory holding `stat` and one numeric directory per process
+    /// * `users` - names to show instead of numeric UIDs
+    /// * `owners` - package that owns each executable
+    #[must_use]
+    pub fn with_lookups(root: impl Into<PathBuf>, users: UserTable, owners: FileOwners) -> Self {
         Self {
             root: root.into(),
             buffer: Vec::with_capacity(INITIAL_BUFFER_CAPACITY),
             path: PathBuf::with_capacity(INITIAL_PATH_CAPACITY),
             process_hint: INITIAL_PROCESS_CAPACITY,
+            statics: StaticsResolver::new(users, owners),
         }
     }
 
-    /// Collector over the real `/proc`.
-    #[must_use]
-    pub fn system() -> Self {
-        Self::new(SYSTEM_PROC_ROOT)
+    /// Collector over the real `/proc`, with `/etc/passwd` and the pacman database loaded.
+    ///
+    /// Loading the package index takes a noticeable fraction of a second; a machine without
+    /// pacman simply gets no package names.
+    ///
+    /// # Errors
+    ///
+    /// * [`SourceError::Io`] when `/etc/passwd` or the pacman database exists but cannot be read.
+    pub fn system() -> Result<Self, SourceError> {
+        let passwd =
+            fs::read_to_string(PASSWD_FILE).map_err(|error| SourceError::io(PASSWD_FILE, error))?;
+        let owners = FileOwners::load(Path::new(PACMAN_LOCAL_DB))?;
+        Ok(Self::with_lookups(
+            SYSTEM_PROC_ROOT,
+            UserTable::parse(&passwd),
+            owners,
+        ))
     }
 
     /// Reads `/proc/stat` and `/proc/[pid]/stat` of every process.
@@ -175,7 +193,7 @@ impl ProcCollector {
     /// ```
     /// use borbatop_sources::ProcCollector;
     ///
-    /// let snapshot = ProcCollector::system().collect()?;
+    /// let snapshot = ProcCollector::system()?.collect()?;
     /// assert!(!snapshot.processes().is_empty());
     /// # Ok::<(), borbatop_sources::SourceError>(())
     /// ```
@@ -194,18 +212,15 @@ impl ProcCollector {
 
     fn read_cpu(&mut self) -> Result<CpuSnapshot, SourceError> {
         let stat_path = self.root.join(STAT_FILE);
-        read_into(&stat_path, &mut self.buffer).map_err(|source| SourceError::Io {
-            path: stat_path,
-            source,
-        })?;
+        read_into(&stat_path, &mut self.buffer)
+            .map_err(|source| SourceError::io(stat_path, source))?;
         parse_cpu_stat(&String::from_utf8_lossy(&self.buffer)).map_err(SourceError::CpuStat)
     }
 
     fn scan_processes(&mut self) -> Result<ProcessScan, SourceError> {
-        let entries = fs::read_dir(&self.root).map_err(|source| SourceError::Io {
-            path: self.root.clone(),
-            source,
-        })?;
+        let entries = fs::read_dir(&self.root)
+            .map_err(|source| SourceError::io(self.root.clone(), source))?;
+        self.statics.begin_scan();
         let mut scan = ProcessScan {
             processes: Vec::with_capacity(self.process_hint),
             failures: Vec::new(),
@@ -213,10 +228,7 @@ impl ProcCollector {
         };
 
         for entry in entries {
-            let entry = entry.map_err(|source| SourceError::Io {
-                path: self.root.clone(),
-                source,
-            })?;
+            let entry = entry.map_err(|source| SourceError::io(self.root.clone(), source))?;
             let name = entry.file_name();
             let Some(pid) = pid_of(&name) else {
                 continue;
@@ -228,7 +240,11 @@ impl ProcCollector {
             self.path.push(STAT_FILE);
 
             match sample_process(&self.path, &mut self.buffer) {
-                Ok(sample) => scan.processes.push(sample),
+                Ok(sample) => {
+                    let directory = self.path.parent().unwrap_or(&self.root);
+                    let statics = self.statics.resolve(directory, &sample);
+                    scan.processes.push(ProcessRecord { sample, statics });
+                }
                 Err(ProcessFailureCause::Io(error)) if is_vanished(&error) => {
                     scan.vanished = scan.vanished.saturating_add(1);
                 }
@@ -236,6 +252,7 @@ impl ProcCollector {
             }
         }
 
+        self.statics.end_scan();
         Ok(scan)
     }
 }
@@ -262,6 +279,8 @@ fn is_vanished(error: &io::Error) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use borbatop_core::CpuStatError;
 
     use super::*;
 
@@ -325,7 +344,11 @@ mod tests {
 
         let snapshot = ProcCollector::new(&tree.root).collect().unwrap();
 
-        let mut pids: Vec<u32> = snapshot.processes().iter().map(|p| p.pid().get()).collect();
+        let mut pids: Vec<u32> = snapshot
+            .processes()
+            .iter()
+            .map(|p| p.sample().pid().get())
+            .collect();
         pids.sort_unstable();
         assert_eq!(pids, [10, 20]);
         assert_eq!(snapshot.cpu().cores().len(), 2);
@@ -387,9 +410,10 @@ mod tests {
         let snapshot = ProcCollector::new(&tree.root).collect().unwrap();
 
         assert!(snapshot.failures().is_empty());
-        let [sample] = snapshot.processes() else {
+        let [record] = snapshot.processes() else {
             panic!("expected exactly one process");
         };
+        let sample = record.sample();
         assert_eq!(sample.comm(), "a\u{FFFD}");
     }
 
@@ -431,7 +455,7 @@ mod tests {
 
     #[test]
     fn real_proc_contains_this_process() {
-        let mut collector = ProcCollector::system();
+        let mut collector = ProcCollector::system().unwrap();
 
         let snapshot = collector.collect().unwrap();
 
@@ -439,8 +463,8 @@ mod tests {
         let found = snapshot
             .processes()
             .iter()
-            .find(|sample| sample.pid() == own);
-        let sample = found.expect("own process must be listed");
+            .find(|record| record.sample().pid() == own);
+        let sample = found.expect("own process must be listed").sample();
         assert!(sample.threads().get() >= 1);
         assert_ne!(sample.comm(), "");
         assert_ne!(snapshot.cpu().cores(), []);

@@ -8,6 +8,7 @@ authors.workspace = true
 
 [dependencies]
 borbatop-core.workspace = true
+rustix = { version = "1.1.6", features = ["process", "param", "fs"] }
 
 [lints]
 workspace = true
