@@ -18,6 +18,7 @@ const IDLE_CODE: char = 'I';
 // Positions of the fields we read, counted after the `)` that closes `comm`;
 // field 3 (`state`) of `proc_pid_stat(5)` is index 0.
 const STATE_INDEX: usize = 0;
+const PARENT_PID_INDEX: usize = 1;
 const USER_TIME_INDEX: usize = 11;
 const SYSTEM_TIME_INDEX: usize = 12;
 const THREADS_INDEX: usize = 17;
@@ -194,6 +195,8 @@ pub enum StatField {
     Pid,
     /// Single-character state.
     State,
+    /// Parent process identifier.
+    ParentPid,
     /// Time spent in user mode.
     UserTime,
     /// Time spent in kernel mode.
@@ -211,6 +214,7 @@ impl fmt::Display for StatField {
         let name = match self {
             Self::Pid => "pid",
             Self::State => "state",
+            Self::ParentPid => "ppid",
             Self::UserTime => "utime",
             Self::SystemTime => "stime",
             Self::Threads => "num_threads",
@@ -257,6 +261,7 @@ impl Error for StatParseError {}
 #[derive(Clone, PartialEq, Eq)]
 pub struct ProcessSample {
     id: ProcessId,
+    parent: Pid,
     comm: String,
     state: ProcessState,
     cpu_ticks: CpuTicks,
@@ -269,6 +274,7 @@ impl fmt::Debug for ProcessSample {
         formatter
             .debug_struct("ProcessSample")
             .field("id", &self.id)
+            .field("parent", &self.parent)
             .field("comm", &REDACTED_COMM)
             .field("state", &self.state)
             .field("cpu_ticks", &self.cpu_ticks)
@@ -289,6 +295,12 @@ impl ProcessSample {
     #[must_use]
     pub const fn pid(&self) -> Pid {
         self.id.pid
+    }
+
+    /// Identifier of the parent process (0 for kernel threads and init).
+    #[must_use]
+    pub const fn parent(&self) -> Pid {
+        self.parent
     }
 
     /// Executable name, truncated by the kernel to 15 bytes.
@@ -368,6 +380,7 @@ pub fn parse_process_stat(line: &str) -> Result<ProcessSample, StatParseError> {
         .map_err(|_| StatParseError::InvalidNumber(StatField::Pid))?;
 
     let mut state: Option<ProcessState> = None;
+    let mut parent: Option<u32> = None;
     let mut user_time: Option<u64> = None;
     let mut system_time: Option<u64> = None;
     let mut threads: Option<u32> = None;
@@ -377,6 +390,7 @@ pub fn parse_process_stat(line: &str) -> Result<ProcessSample, StatParseError> {
     for (index, token) in rest.split_ascii_whitespace().enumerate() {
         match index {
             STATE_INDEX => state = Some(parse_state(token)?),
+            PARENT_PID_INDEX => parent = Some(parse_number(token, StatField::ParentPid)?),
             USER_TIME_INDEX => user_time = Some(parse_number(token, StatField::UserTime)?),
             SYSTEM_TIME_INDEX => system_time = Some(parse_number(token, StatField::SystemTime)?),
             THREADS_INDEX => threads = Some(parse_number(token, StatField::Threads)?),
@@ -398,12 +412,14 @@ pub fn parse_process_stat(line: &str) -> Result<ProcessSample, StatParseError> {
         .ok_or(StatParseError::CpuTimeOverflow)?;
     let start_time = start_time.ok_or(StatParseError::MissingField(StatField::StartTime))?;
     let resident = resident_pages.ok_or(StatParseError::MissingField(StatField::ResidentPages))?;
+    let parent = parent.ok_or(StatParseError::MissingField(StatField::ParentPid))?;
 
     Ok(ProcessSample {
         id: ProcessId {
             pid: Pid(pid),
             start_time: StartTime(start_time),
         },
+        parent: Pid(parent),
         comm: comm.to_owned(),
         state: state.ok_or(StatParseError::MissingField(StatField::State))?,
         cpu_ticks: CpuTicks(cpu_ticks),
@@ -450,6 +466,7 @@ mod tests {
     fn parses_a_regular_line() {
         let sample = parse_process_stat(LINE).unwrap();
         assert_eq!(sample.pid(), Pid::new(10));
+        assert_eq!(sample.parent(), Pid::new(0));
         assert_eq!(sample.id().start_time(), StartTime(1));
         assert_eq!(sample.comm(), "init");
         assert_eq!(sample.state(), ProcessState::Sleeping);
