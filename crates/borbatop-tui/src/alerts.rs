@@ -134,7 +134,25 @@ impl Alert {
 #[must_use]
 pub fn evaluate(model: &Model, thresholds: &AlertThresholds) -> Vec<Alert> {
     let mut alerts = Vec::new();
+    cpu_alert(&mut alerts, model, thresholds);
+    memory_alerts(&mut alerts, model, thresholds);
+    for (kind, pressure) in [
+        (AlertKind::CpuPressure, model.pressure.cpu),
+        (AlertKind::MemoryPressure, model.pressure.memory),
+        (AlertKind::IoPressure, model.pressure.io),
+    ] {
+        pressure_alert(&mut alerts, kind, pressure, thresholds);
+    }
+    temperature_alert(&mut alerts, model, thresholds);
 
+    let failed = failed_units(model);
+    if failed > 0 {
+        alerts.push(Alert::new(AlertKind::FailedUnits, failed.to_string()));
+    }
+    alerts
+}
+
+fn cpu_alert(alerts: &mut Vec<Alert>, model: &Model, thresholds: &AlertThresholds) {
     let cpu = model.cpu_history.iter().next_back().copied().unwrap_or(0);
     if cpu >= thresholds.cpu.get() {
         alerts.push(Alert::new(
@@ -142,55 +160,36 @@ pub fn evaluate(model: &Model, thresholds: &AlertThresholds) -> Vec<Alert> {
             format!("{}%", Permille::new(cpu)),
         ));
     }
+}
 
-    if let Some(memory) = &model.memory {
-        let used = memory.used().permille_of(memory.total());
-        if used >= thresholds.memory.get() {
-            alerts.push(Alert::new(
-                AlertKind::Memory,
-                format!("{}%", Permille::new(used)),
-            ));
-        }
-        let swapped = memory.swap_used().permille_of(memory.swap_total());
-        if memory.swap_total().get() > 0 && swapped >= thresholds.swap.get() {
-            alerts.push(Alert::new(
-                AlertKind::Swap,
-                format!("{}%", Permille::new(swapped)),
-            ));
-        }
+fn memory_alerts(alerts: &mut Vec<Alert>, model: &Model, thresholds: &AlertThresholds) {
+    let Some(memory) = &model.memory else {
+        return;
+    };
+    let used = memory.used().permille_of(memory.total());
+    if used >= thresholds.memory.get() {
+        alerts.push(Alert::new(
+            AlertKind::Memory,
+            format!("{}%", Permille::new(used)),
+        ));
     }
-
-    pressure_alert(
-        &mut alerts,
-        AlertKind::CpuPressure,
-        model.pressure.cpu,
-        thresholds,
-    );
-    pressure_alert(
-        &mut alerts,
-        AlertKind::MemoryPressure,
-        model.pressure.memory,
-        thresholds,
-    );
-    pressure_alert(
-        &mut alerts,
-        AlertKind::IoPressure,
-        model.pressure.io,
-        thresholds,
-    );
-
-    if let Some(temperature) = model.temperature {
-        let degrees = temperature.rounded_degrees();
-        if degrees >= thresholds.temperature_degrees {
-            alerts.push(Alert::new(AlertKind::Temperature, format!("{degrees}°C")));
-        }
+    let swapped = memory.swap_used().permille_of(memory.swap_total());
+    if memory.swap_total().get() > 0 && swapped >= thresholds.swap.get() {
+        alerts.push(Alert::new(
+            AlertKind::Swap,
+            format!("{}%", Permille::new(swapped)),
+        ));
     }
+}
 
-    let failed = failed_units(model);
-    if failed > 0 {
-        alerts.push(Alert::new(AlertKind::FailedUnits, failed.to_string()));
+fn temperature_alert(alerts: &mut Vec<Alert>, model: &Model, thresholds: &AlertThresholds) {
+    let Some(temperature) = model.temperature else {
+        return;
+    };
+    let degrees = temperature.rounded_degrees();
+    if degrees >= thresholds.temperature_degrees {
+        alerts.push(Alert::new(AlertKind::Temperature, format!("{degrees}°C")));
     }
-    alerts
 }
 
 fn pressure_alert(

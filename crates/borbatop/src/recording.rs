@@ -357,6 +357,13 @@ fn temperature(json: &Json) -> Field<Option<MilliCelsius>> {
 /// Rebuilds a [`Model`] from one snapshot line; histories are filled in by the caller.
 fn model_from_json(json: &Json, history_len: usize) -> Field<Model> {
     let mut model = Model::empty(history_len);
+    machine_fields(json, &mut model)?;
+    table_fields(json, &mut model, history_len)?;
+    Ok(model)
+}
+
+/// The machine-wide readings: kernel, uptime, load, cores, memory, temperature and pressure.
+fn machine_fields(json: &Json, model: &mut Model) -> Field<()> {
     text(json, "kernel")?.clone_into(&mut model.kernel_release);
     model.uptime = optional(json, "uptime_seconds")?
         .map(|value| {
@@ -387,6 +394,11 @@ fn model_from_json(json: &Json, history_len: usize) -> Field<Model> {
         memory: pressure(pressures, "memory")?,
         io: pressure(pressures, "io")?,
     };
+    Ok(())
+}
+
+/// The tables: processes, units, interfaces, disks and mounts.
+fn table_fields(json: &Json, model: &mut Model, history_len: usize) -> Field<()> {
     model.processes = items(json, "processes")?
         .iter()
         .map(process)
@@ -394,38 +406,45 @@ fn model_from_json(json: &Json, history_len: usize) -> Field<Model> {
     model.services = services(json)?;
     model.network = items(json, "network")?
         .iter()
-        .map(|interface| {
-            Ok(NetRow {
-                name: text(interface, "name")?.to_owned(),
-                received: rate(interface, "received_bytes_per_second")?,
-                sent: rate(interface, "sent_bytes_per_second")?,
-                received_history: History::new(history_len),
-                sent_history: History::new(history_len),
-            })
-        })
+        .map(|interface| net_row(interface, history_len))
         .collect::<Field<Vec<NetRow>>>()?;
     model.disks = items(json, "disks")?
         .iter()
-        .map(|disk| {
-            Ok(DiskRow {
-                name: text(disk, "name")?.to_owned(),
-                read: rate(disk, "read_bytes_per_second")?,
-                written: rate(disk, "written_bytes_per_second")?,
-            })
-        })
+        .map(disk_row)
         .collect::<Field<Vec<DiskRow>>>()?;
     model.mounts = items(json, "mounts")?
         .iter()
-        .map(|mount| {
-            Ok(MountRow {
-                mount_point: text(mount, "mount_point")?.to_owned(),
-                fs_type: text(mount, "fs_type")?.to_owned(),
-                total: Bytes::new(unsigned(mount, "total_bytes")?),
-                used: Bytes::new(unsigned(mount, "used_bytes")?),
-            })
-        })
+        .map(mount_row)
         .collect::<Field<Vec<MountRow>>>()?;
-    Ok(model)
+    Ok(())
+}
+
+fn net_row(json: &Json, history_len: usize) -> Field<NetRow> {
+    Ok(NetRow {
+        name: text(json, "name")?.to_owned(),
+        received: rate(json, "received_bytes_per_second")?,
+        sent: rate(json, "sent_bytes_per_second")?,
+        // Filled in while loading, in recording order.
+        received_history: History::new(history_len),
+        sent_history: History::new(history_len),
+    })
+}
+
+fn disk_row(json: &Json) -> Field<DiskRow> {
+    Ok(DiskRow {
+        name: text(json, "name")?.to_owned(),
+        read: rate(json, "read_bytes_per_second")?,
+        written: rate(json, "written_bytes_per_second")?,
+    })
+}
+
+fn mount_row(json: &Json) -> Field<MountRow> {
+    Ok(MountRow {
+        mount_point: text(json, "mount_point")?.to_owned(),
+        fs_type: text(json, "fs_type")?.to_owned(),
+        total: Bytes::new(unsigned(json, "total_bytes")?),
+        used: Bytes::new(unsigned(json, "used_bytes")?),
+    })
 }
 
 #[cfg(test)]

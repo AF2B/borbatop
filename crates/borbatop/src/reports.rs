@@ -8,10 +8,10 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use borbatop_core::{
-    Bytes, FdKind, GpuCard, GpuVendor, Permille, SocketState, StartupBlame, container_id_of_unit,
-    same_container,
+    Bytes, ContainerInfo, FdKind, GpuCard, GpuVendor, Permille, SocketState, StartupBlame,
+    container_id_of_unit, same_container,
 };
-use borbatop_sources::{ConnectionReport, GpuReport, ProcessDetail, RuntimeListing};
+use borbatop_sources::{Connection, ConnectionReport, GpuReport, ProcessDetail, RuntimeListing};
 use borbatop_tui::{Report, ReportLine, ReportTone};
 
 const ADDRESS_WIDTH: usize = 28;
@@ -26,6 +26,7 @@ const SECONDS_PER_MINUTE: u64 = 60;
 const MILLIS_PER_TENTH: u128 = 100;
 const LIMIT_NAMES: [&str; 3] = ["Max open files", "Max processes", "Max locked memory"];
 const NO_OWNER: &str = "—";
+const SHORT_ID_LEN: usize = 12;
 
 /// The CPU and memory of one running process, to total up per container.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,20 +86,12 @@ fn state_tone(state: SocketState) -> ReportTone {
 /// * `report` - sockets read from `/proc/net` and matched to processes
 #[must_use]
 pub fn connections_report(report: &ConnectionReport) -> Report {
-    let mut connections: Vec<_> = report.connections().iter().collect();
-    connections.sort_by_key(|connection| {
-        let entry = connection.entry();
-        (
-            entry.state() != SocketState::Listen,
-            entry.local().port(),
-            entry.protocol().label(),
-        )
-    });
-
+    let connections = sorted_connections(report);
     let listening = connections
         .iter()
         .filter(|connection| connection.entry().state() == SocketState::Listen)
         .count();
+
     let mut lines = vec![
         line(
             format!("{} sockets · {listening} listening", connections.len()),
@@ -112,22 +105,45 @@ pub fn connections_report(report: &ConnectionReport) -> Report {
             ReportTone::Dim,
         ),
     ];
-    for connection in connections {
+    lines.extend(connections.into_iter().map(connection_row));
+    lines.extend(connection_notes(report));
+    Report { lines }
+}
+
+/// Listeners first, then by local port.
+fn sorted_connections(report: &ConnectionReport) -> Vec<&Connection> {
+    let mut connections: Vec<&Connection> = report.connections().iter().collect();
+    connections.sort_by_key(|connection| {
         let entry = connection.entry();
-        lines.push(line(
-            format!(
-                "{:<PROTOCOL_WIDTH$} {:<STATE_WIDTH$} {:<ADDRESS_WIDTH$} {:<ADDRESS_WIDTH$} {}",
-                entry.protocol().label(),
-                entry.state().name(),
-                entry.local().to_string(),
-                entry.remote().to_string(),
-                owner_text(connection),
-            ),
-            state_tone(entry.state()),
-        ));
-    }
+        (
+            entry.state() != SocketState::Listen,
+            entry.local().port(),
+            entry.protocol().label(),
+        )
+    });
+    connections
+}
+
+fn connection_row(connection: &Connection) -> ReportLine {
+    let entry = connection.entry();
+    line(
+        format!(
+            "{:<PROTOCOL_WIDTH$} {:<STATE_WIDTH$} {:<ADDRESS_WIDTH$} {:<ADDRESS_WIDTH$} {}",
+            entry.protocol().label(),
+            entry.state().name(),
+            entry.local().to_string(),
+            entry.remote().to_string(),
+            owner_text(connection),
+        ),
+        state_tone(entry.state()),
+    )
+}
+
+/// What the person should know about the limits of this listing.
+fn connection_notes(report: &ConnectionReport) -> Vec<ReportLine> {
+    let mut notes = Vec::new();
     if report.unreadable_processes() > 0 {
-        lines.push(line(
+        notes.push(line(
             format!(
                 "{} processes cannot be inspected by this user: their sockets show no owner",
                 report.unreadable_processes()
@@ -136,7 +152,7 @@ pub fn connections_report(report: &ConnectionReport) -> Report {
         ));
     }
     if report.missing_tables() > 0 {
-        lines.push(line(
+        notes.push(line(
             format!(
                 "{} socket tables could not be read",
                 report.missing_tables()
@@ -144,10 +160,10 @@ pub fn connections_report(report: &ConnectionReport) -> Report {
             ReportTone::Dim,
         ));
     }
-    Report { lines }
+    notes
 }
 
-fn owner_text(connection: &borbatop_sources::Connection) -> String {
+fn owner_text(connection: &Connection) -> String {
     let Some(first) = connection.owners().first() else {
         return NO_OWNER.to_owned();
     };
@@ -298,40 +314,46 @@ pub fn boot_report(summary: Result<&str, &str>, blame: Result<&StartupBlame, &st
 
     lines.push(line("Slowest units", ReportTone::Heading));
     match blame {
-        Ok(blame) => {
-            for startup in blame.units().iter().take(MAX_STARTUP_ROWS) {
-                let tone = if startup.duration() >= SLOW_UNIT {
-                    ReportTone::Bad
-                } else if startup.duration() >= NOTICEABLE_UNIT {
-                    ReportTone::Normal
-                } else {
-                    ReportTone::Dim
-                };
-                lines.push(line(
-                    format!(
-                        "  {:>10}  {}",
-                        format_duration(startup.duration()),
-                        startup.unit()
-                    ),
-                    tone,
-                ));
-            }
-            if blame.units().len() > MAX_STARTUP_ROWS {
-                lines.push(line(
-                    format!(
-                        "  … {} more units",
-                        blame.units().len().saturating_sub(MAX_STARTUP_ROWS)
-                    ),
-                    ReportTone::Dim,
-                ));
-            }
-        }
+        Ok(blame) => lines.extend(slowest_unit_lines(blame)),
         Err(reason) => lines.push(line(
             format!("  systemd-analyze blame: {reason}"),
             ReportTone::Bad,
         )),
     }
     Report { lines }
+}
+
+fn startup_tone(duration: Duration) -> ReportTone {
+    if duration >= SLOW_UNIT {
+        ReportTone::Bad
+    } else if duration >= NOTICEABLE_UNIT {
+        ReportTone::Normal
+    } else {
+        ReportTone::Dim
+    }
+}
+
+fn slowest_unit_lines(blame: &StartupBlame) -> Vec<ReportLine> {
+    let mut lines: Vec<ReportLine> = blame
+        .units()
+        .iter()
+        .take(MAX_STARTUP_ROWS)
+        .map(|startup| {
+            line(
+                format!(
+                    "  {:>10}  {}",
+                    format_duration(startup.duration()),
+                    startup.unit()
+                ),
+                startup_tone(startup.duration()),
+            )
+        })
+        .collect();
+    let hidden = blame.units().len().saturating_sub(MAX_STARTUP_ROWS);
+    if hidden > 0 {
+        lines.push(line(format!("  … {hidden} more units"), ReportTone::Dim));
+    }
+    lines
 }
 
 // ----------------------------------------------------------------------- logs
@@ -495,7 +517,7 @@ fn usage_text(totals: Option<&Totals>) -> String {
 pub fn containers_report(listings: &[RuntimeListing], usage: &[ProcessUsage]) -> Report {
     let totals = totals_by_container(usage);
     let mut lines = Vec::new();
-    let mut listed_ids: Vec<String> = Vec::new();
+    let mut listed_ids: Vec<&str> = Vec::new();
 
     for listing in listings {
         lines.push(line(listing.runtime(), ReportTone::Heading));
@@ -505,25 +527,8 @@ pub fn containers_report(listings: &[RuntimeListing], usage: &[ProcessUsage]) ->
             }
             Ok(containers) => {
                 for container in containers {
-                    let found = totals
-                        .iter()
-                        .find(|(full, _)| same_container(full, &container.id));
-                    listed_ids.push(container.id.clone());
-                    lines.push(line(
-                        format!(
-                            "  {} · {} · {}",
-                            container.name, container.id, container.status
-                        ),
-                        ReportTone::Good,
-                    ));
-                    lines.push(line(
-                        format!(
-                            "    {} · {}",
-                            container.image,
-                            usage_text(found.map(|(_, t)| t))
-                        ),
-                        ReportTone::Normal,
-                    ));
+                    listed_ids.push(&container.id);
+                    lines.extend(container_lines(container, &totals));
                 }
             }
             Err(error) => lines.push(line(format!("  {error}"), ReportTone::Bad)),
@@ -535,27 +540,56 @@ pub fn containers_report(listings: &[RuntimeListing], usage: &[ProcessUsage]) ->
             ReportTone::Dim,
         ));
     }
+    lines.extend(unlisted_scope_lines(&totals, &listed_ids));
+    Report { lines }
+}
 
+/// Two lines for one listed container: who it is, and what its processes use.
+fn container_lines(container: &ContainerInfo, totals: &BTreeMap<&str, Totals>) -> [ReportLine; 2] {
+    let found = totals
+        .iter()
+        .find(|(full, _)| same_container(full, &container.id))
+        .map(|(_, total)| total);
+    [
+        line(
+            format!(
+                "  {} · {} · {}",
+                container.name, container.id, container.status
+            ),
+            ReportTone::Good,
+        ),
+        line(
+            format!("    {} · {}", container.image, usage_text(found)),
+            ReportTone::Normal,
+        ),
+    ]
+}
+
+/// Container scopes that run processes but that no installed runtime listed (the runtime may be
+/// missing, stopped, or refuse this user), biggest memory first.
+fn unlisted_scope_lines(totals: &BTreeMap<&str, Totals>, listed_ids: &[&str]) -> Vec<ReportLine> {
     let mut unlisted: Vec<(&str, &Totals)> = totals
         .iter()
         .filter(|(full, _)| !listed_ids.iter().any(|short| same_container(full, short)))
         .map(|(id, total)| (*id, total))
         .collect();
-    unlisted.sort_by_key(|(_, total)| Reverse(total.memory));
-    if !unlisted.is_empty() {
-        lines.push(line(
-            "Container scopes seen in the process list",
-            ReportTone::Heading,
-        ));
-        for (id, total) in unlisted {
-            let short = id.get(..12).unwrap_or(id);
-            lines.push(line(
-                format!("  {short} · {}", usage_text(Some(total))),
-                ReportTone::Normal,
-            ));
-        }
+    if unlisted.is_empty() {
+        return Vec::new();
     }
-    Report { lines }
+    unlisted.sort_by_key(|(_, total)| Reverse(total.memory));
+
+    let mut lines = vec![line(
+        "Container scopes seen in the process list",
+        ReportTone::Heading,
+    )];
+    for (id, total) in unlisted {
+        let short = id.get(..SHORT_ID_LEN).unwrap_or(id);
+        lines.push(line(
+            format!("  {short} · {}", usage_text(Some(total))),
+            ReportTone::Normal,
+        ));
+    }
+    lines
 }
 
 #[cfg(test)]

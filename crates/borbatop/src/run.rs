@@ -4,7 +4,7 @@ use std::io;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
-use borbatop_core::{Nice, ProcessId};
+use borbatop_core::{Nice, Pid, ProcessId};
 use borbatop_sources::{ScheduleError, send_signal, set_affinity, set_nice};
 use borbatop_tui::{
     App, Command, MessageKind, Model, Seek, SignalChoice, UiConfig, draw, is_interrupt,
@@ -241,63 +241,58 @@ fn execute(command: Command, app: &mut App, events: &Sender<WorkerEvent>) -> boo
         Command::SetNice { id, nice } => renice(app, id, nice),
         Command::SetAffinity { id, cpus } => pin(app, id, &cpus),
         Command::ControlUnit { unit, action } => {
-            if let Err(error) = spawn_unit_action(events.clone(), unit, unit_action_of(action)) {
-                app.notify(
-                    format!("cannot start systemctl: {error}"),
-                    MessageKind::Error,
-                );
-            }
+            let started = spawn_unit_action(events.clone(), unit, unit_action_of(action));
+            report_start(app, "start systemctl", started);
         }
         Command::LoadDetail { id, label } => {
-            if let Err(error) = spawn_detail(events.clone(), id, label) {
-                app.notify(
-                    format!("cannot read process details: {error}"),
-                    MessageKind::Error,
-                );
-            }
+            report_start(
+                app,
+                "read process details",
+                spawn_detail(events.clone(), id, label),
+            );
         }
         Command::LoadReport(tab) => {
-            let usage = app
-                .model()
-                .processes
-                .iter()
-                .map(|process| ProcessUsage {
-                    unit: process.unit.clone(),
-                    cpu: process.cpu,
-                    memory: process.memory,
-                })
-                .collect();
-            if let Err(error) = spawn_report(events.clone(), tab, usage) {
-                app.notify(
-                    format!("cannot build the {} report: {error}", tab.label()),
-                    MessageKind::Error,
-                );
-            }
+            let started = spawn_report(events.clone(), tab, usage_of(app.model()));
+            report_start(app, &format!("build the {} report", tab.label()), started);
         }
         Command::RefreshPacman => {
-            let processes = app
-                .model()
-                .processes
-                .iter()
-                .map(|process| (process.pid, process_name(&process.command)))
-                .collect();
-            if let Err(error) = spawn_pacman(events.clone(), processes) {
-                app.notify(
-                    format!("cannot start pacman report: {error}"),
-                    MessageKind::Error,
-                );
-            }
+            let started = spawn_pacman(events.clone(), pacman_inputs(app.model()));
+            report_start(app, "start the pacman report", started);
         }
         Command::LoadLogs { unit } => {
-            if let Err(error) = spawn_logs(events.clone(), unit) {
-                app.notify(
-                    format!("cannot start journalctl: {error}"),
-                    MessageKind::Error,
-                );
-            }
+            report_start(app, "start journalctl", spawn_logs(events.clone(), unit));
         }
     }
     true
+}
+
+/// Tells the person when a background thread could not be started.
+fn report_start(app: &mut App, what: &str, started: io::Result<()>) {
+    if let Err(error) = started {
+        app.notify(format!("cannot {what}: {error}"), MessageKind::Error);
+    }
+}
+
+/// CPU and memory of every process, to total up per container.
+fn usage_of(model: &Model) -> Vec<ProcessUsage> {
+    model
+        .processes
+        .iter()
+        .map(|process| ProcessUsage {
+            unit: process.unit.clone(),
+            cpu: process.cpu,
+            memory: process.memory,
+        })
+        .collect()
+}
+
+/// `(pid, program name)` of every process, to look for stale libraries.
+fn pacman_inputs(model: &Model) -> Vec<(Pid, String)> {
+    model
+        .processes
+        .iter()
+        .map(|process| (process.pid, process_name(&process.command)))
+        .collect()
 }
 
 fn deliver(app: &mut App, id: ProcessId, choice: SignalChoice) {

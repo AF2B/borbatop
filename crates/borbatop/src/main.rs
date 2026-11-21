@@ -32,6 +32,7 @@ fn main() -> ExitCode {
 fn start() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
 
+    // These two need neither the configuration file nor the machine.
     match &cli.command {
         Some(Extra::Completions { shell }) => {
             write_completions(*shell, &mut io::stdout());
@@ -41,6 +42,40 @@ fn start() -> Result<(), Box<dyn Error>> {
         Some(Extra::Snapshot { .. } | Extra::Record { .. } | Extra::Replay { .. }) | None => {}
     }
 
+    let settings = load_settings(&cli)?;
+    match &cli.command {
+        Some(command @ Extra::Snapshot { .. }) => {
+            let json = snapshot::capture(settings, command.command_lines())?;
+            writeln!(io::stdout(), "{}", json.render())?;
+        }
+        Some(Extra::Record {
+            file,
+            samples,
+            with_commands,
+        }) => {
+            let commands = Extra::command_lines_for(*with_commands);
+            recording::record(settings, file, *samples, commands)?;
+            eprintln!("recorded {samples} samples to {}", file.display());
+        }
+        Some(Extra::Replay { file }) => {
+            let models = recording::load(file, settings.history_len)?;
+            run::replay(settings, models)?;
+        }
+        Some(Extra::Completions { .. } | Extra::Man) => {}
+        None => {
+            if !io::stdout().is_terminal() {
+                return Err(
+                    "needs an interactive terminal: standard output is not a terminal".into(),
+                );
+            }
+            run::run(settings)?;
+        }
+    }
+    Ok(())
+}
+
+/// Defaults, then the configuration file, then the command line.
+fn load_settings(cli: &Cli) -> Result<Settings, Box<dyn Error>> {
     let path = cli.config.clone().or_else(|| {
         let xdg = std::env::var("XDG_CONFIG_HOME").ok();
         let home = std::env::var("HOME").ok();
@@ -50,36 +85,5 @@ fn start() -> Result<(), Box<dyn Error>> {
         Some(path) => load(&path)?,
         None => FileConfig::default(),
     };
-    let settings = Settings::resolve(&file, cli.overrides())?;
-
-    if let Some(snapshot_command @ Extra::Snapshot { .. }) = &cli.command {
-        let json = snapshot::capture(settings, snapshot_command.command_lines())?;
-        writeln!(io::stdout(), "{}", json.render())?;
-        return Ok(());
-    }
-
-    match &cli.command {
-        Some(Extra::Record {
-            file,
-            samples,
-            with_commands,
-        }) => {
-            let commands = Extra::command_lines_for(*with_commands);
-            recording::record(settings, file, *samples, commands)?;
-            eprintln!("recorded {samples} samples to {}", file.display());
-            return Ok(());
-        }
-        Some(Extra::Replay { file }) => {
-            let models = recording::load(file, settings.history_len)?;
-            run::replay(settings, models)?;
-            return Ok(());
-        }
-        Some(Extra::Completions { .. } | Extra::Man | Extra::Snapshot { .. }) | None => {}
-    }
-
-    if !io::stdout().is_terminal() {
-        return Err("needs an interactive terminal: standard output is not a terminal".into());
-    }
-    run::run(settings)?;
-    Ok(())
+    Ok(Settings::resolve(&file, cli.overrides())?)
 }
