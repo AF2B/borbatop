@@ -1,7 +1,7 @@
 //! Translation between the data sources' types and the screen's types.
 
 use borbatop_sources::{KernelStatus, PacmanReport, Reading, Signal, UnitAction};
-use borbatop_tui::{KernelView, PacmanView, ServiceAction, SignalChoice, StaleView};
+use borbatop_tui::{AurView, KernelView, PacmanView, ServiceAction, SignalChoice, StaleView};
 
 /// The screen's view of a Pacman report; every failed part keeps its own message.
 ///
@@ -12,6 +12,12 @@ use borbatop_tui::{KernelView, PacmanView, ServiceAction, SignalChoice, StaleVie
 pub fn pacman_view(report: &PacmanReport) -> PacmanView {
     PacmanView {
         upgrades: converted(report.upgrades(), Clone::clone),
+        aur: converted(report.aur(), |aur| {
+            aur.as_ref().map(|found| AurView {
+                helper: found.helper().to_owned(),
+                upgrades: found.upgrades().to_vec(),
+            })
+        }),
         orphans: converted(report.orphans(), Clone::clone),
         kernel: converted(report.kernel(), kernel_view),
         pending_config: converted(report.pending_config(), |config| {
@@ -109,6 +115,7 @@ mod tests {
         let view = pacman_view(&report);
         assert_eq!(view.kernel.is_ok(), report.kernel().is_ok());
         assert_eq!(view.upgrades.is_ok(), report.upgrades().is_ok());
+        assert_eq!(view.aur.is_ok(), report.aur().is_ok());
         assert_eq!(view.cache.is_ok(), report.cache_size().is_ok());
     }
 }

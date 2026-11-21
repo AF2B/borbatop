@@ -1,0 +1,761 @@
+//! Turning what the data sources found into the lines each tab and overlay shows.
+//!
+//! Everything here is pure formatting: no I/O, so each report can be tested with made-up data.
+
+use std::cmp::Reverse;
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::time::Duration;
+
+use borbatop_core::{
+    Bytes, FdKind, GpuCard, GpuVendor, Permille, SocketState, StartupBlame, container_id_of_unit,
+    same_container,
+};
+use borbatop_sources::{ConnectionReport, GpuReport, ProcessDetail, RuntimeListing};
+use borbatop_tui::{Report, ReportLine, ReportTone};
+
+const ADDRESS_WIDTH: usize = 28;
+const STATE_WIDTH: usize = 12;
+const PROTOCOL_WIDTH: usize = 6;
+const MAX_STARTUP_ROWS: usize = 40;
+const MAX_FILE_ROWS: usize = 60;
+const SLOW_UNIT: Duration = Duration::from_secs(5);
+const NOTICEABLE_UNIT: Duration = Duration::from_secs(1);
+const MILLIS_PER_SECOND: u128 = 1_000;
+const SECONDS_PER_MINUTE: u64 = 60;
+const MILLIS_PER_TENTH: u128 = 100;
+const LIMIT_NAMES: [&str; 3] = ["Max open files", "Max processes", "Max locked memory"];
+const NO_OWNER: &str = "—";
+
+/// The CPU and memory of one running process, to total up per container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessUsage {
+    /// Systemd unit that runs the process.
+    pub unit: String,
+    /// CPU usage over the last window.
+    pub cpu: Permille,
+    /// Resident memory.
+    pub memory: Bytes,
+}
+
+fn line(text: impl Into<String>, tone: ReportTone) -> ReportLine {
+    ReportLine::new(text, tone)
+}
+
+/// A duration the way systemd prints it: `889ms`, `5.2s`, `1min 3.2s`.
+fn format_duration(duration: Duration) -> String {
+    let millis = duration.as_millis();
+    if millis < MILLIS_PER_SECOND {
+        return format!("{millis}ms");
+    }
+    let seconds = duration.as_secs();
+    let tenth = (millis % MILLIS_PER_SECOND) / MILLIS_PER_TENTH;
+    let minutes = seconds / SECONDS_PER_MINUTE;
+    let rest = seconds % SECONDS_PER_MINUTE;
+    if minutes == 0 {
+        format!("{rest}.{tenth}s")
+    } else {
+        format!("{minutes}min {rest}.{tenth}s")
+    }
+}
+
+// ---------------------------------------------------------------- connections
+
+fn state_tone(state: SocketState) -> ReportTone {
+    match state {
+        SocketState::Listen => ReportTone::Good,
+        SocketState::Established => ReportTone::Normal,
+        SocketState::TimeWait
+        | SocketState::Close
+        | SocketState::CloseWait
+        | SocketState::FinWait1
+        | SocketState::FinWait2
+        | SocketState::LastAck
+        | SocketState::Closing => ReportTone::Dim,
+        SocketState::SynSent | SocketState::SynReceived | SocketState::NewSynReceived => {
+            ReportTone::Normal
+        }
+    }
+}
+
+/// The Connections tab: every socket with the process that owns it.
+///
+/// # Arguments
+///
+/// * `report` - sockets read from `/proc/net` and matched to processes
+#[must_use]
+pub fn connections_report(report: &ConnectionReport) -> Report {
+    let mut connections: Vec<_> = report.connections().iter().collect();
+    connections.sort_by_key(|connection| {
+        let entry = connection.entry();
+        (
+            entry.state() != SocketState::Listen,
+            entry.local().port(),
+            entry.protocol().label(),
+        )
+    });
+
+    let listening = connections
+        .iter()
+        .filter(|connection| connection.entry().state() == SocketState::Listen)
+        .count();
+    let mut lines = vec![
+        line(
+            format!("{} sockets · {listening} listening", connections.len()),
+            ReportTone::Heading,
+        ),
+        line(
+            format!(
+                "{:<PROTOCOL_WIDTH$} {:<STATE_WIDTH$} {:<ADDRESS_WIDTH$} {:<ADDRESS_WIDTH$} OWNER",
+                "PROTO", "STATE", "LOCAL", "REMOTE"
+            ),
+            ReportTone::Dim,
+        ),
+    ];
+    for connection in connections {
+        let entry = connection.entry();
+        lines.push(line(
+            format!(
+                "{:<PROTOCOL_WIDTH$} {:<STATE_WIDTH$} {:<ADDRESS_WIDTH$} {:<ADDRESS_WIDTH$} {}",
+                entry.protocol().label(),
+                entry.state().name(),
+                entry.local().to_string(),
+                entry.remote().to_string(),
+                owner_text(connection),
+            ),
+            state_tone(entry.state()),
+        ));
+    }
+    if report.unreadable_processes() > 0 {
+        lines.push(line(
+            format!(
+                "{} processes cannot be inspected by this user: their sockets show no owner",
+                report.unreadable_processes()
+            ),
+            ReportTone::Dim,
+        ));
+    }
+    if report.missing_tables() > 0 {
+        lines.push(line(
+            format!(
+                "{} socket tables could not be read",
+                report.missing_tables()
+            ),
+            ReportTone::Dim,
+        ));
+    }
+    Report { lines }
+}
+
+fn owner_text(connection: &borbatop_sources::Connection) -> String {
+    let Some(first) = connection.owners().first() else {
+        return NO_OWNER.to_owned();
+    };
+    let extra = connection.owners().len().saturating_sub(1);
+    if extra == 0 {
+        format!("{} {}", first.pid(), first.comm())
+    } else {
+        format!("{} {} +{extra}", first.pid(), first.comm())
+    }
+}
+
+// --------------------------------------------------------------------- detail
+
+/// The overlay text for one process: executable, memory, descriptors, sockets and limits.
+///
+/// # Arguments
+///
+/// * `detail` - what the kernel says about the process
+#[must_use]
+pub fn detail_text(detail: &ProcessDetail) -> String {
+    let mut text = String::new();
+    push_field(&mut text, "Executable", detail.exe().as_ref());
+    push_field(&mut text, "Directory", detail.cwd().as_ref());
+    push_memory(&mut text, detail);
+    push_descriptors(&mut text, detail);
+    push_sockets(&mut text, detail);
+    push_limits(&mut text, detail);
+    text
+}
+
+fn push_field<E: std::fmt::Display>(text: &mut String, label: &str, value: Result<&String, E>) {
+    let shown = match value {
+        Ok(value) => value.clone(),
+        Err(error) => format!("unavailable ({error})"),
+    };
+    let _written = writeln!(text, "{label:<12} {shown}");
+}
+
+fn push_memory(text: &mut String, detail: &ProcessDetail) {
+    let show = |bytes: Option<Bytes>| bytes.map_or_else(|| "n/a".to_owned(), |b| b.to_string());
+    let _written = writeln!(
+        text,
+        "{:<12} resident {} · peak {} · swapped {}",
+        "Memory",
+        show(detail.resident()),
+        show(detail.peak_resident()),
+        show(detail.swapped()),
+    );
+}
+
+fn push_descriptors(text: &mut String, detail: &ProcessDetail) {
+    let descriptors = match detail.descriptors() {
+        Ok(descriptors) => descriptors,
+        Err(error) => {
+            let _written = writeln!(text, "{:<12} unavailable ({error})", "Descriptors");
+            return;
+        }
+    };
+    let (mut files, mut sockets, mut pipes, mut other) = (0_usize, 0_usize, 0_usize, 0_usize);
+    for descriptor in descriptors {
+        let counter = match descriptor.kind() {
+            FdKind::Path(_) => &mut files,
+            FdKind::Socket(_) => &mut sockets,
+            FdKind::Pipe => &mut pipes,
+            FdKind::Anonymous(_) | FdKind::Other(_) => &mut other,
+        };
+        *counter = counter.saturating_add(1);
+    }
+    let _written = writeln!(
+        text,
+        "{:<12} {} open: {files} files · {sockets} sockets · {pipes} pipes · {other} other",
+        "Descriptors",
+        descriptors.len(),
+    );
+
+    let _written = writeln!(text, "\nOpen files");
+    let paths = descriptors
+        .iter()
+        .filter_map(|descriptor| match descriptor.kind() {
+            FdKind::Path(path) => Some((descriptor.fd(), path)),
+            FdKind::Socket(_) | FdKind::Pipe | FdKind::Anonymous(_) | FdKind::Other(_) => None,
+        });
+    let mut shown = 0_usize;
+    for (fd, path) in paths.take(MAX_FILE_ROWS) {
+        let _written = writeln!(text, "  {fd:>4}  {path}");
+        shown = shown.saturating_add(1);
+    }
+    if shown < files {
+        let _written = writeln!(text, "  … {} more", files.saturating_sub(shown));
+    }
+}
+
+fn push_sockets(text: &mut String, detail: &ProcessDetail) {
+    if detail.sockets().is_empty() {
+        return;
+    }
+    let _written = writeln!(text, "\nSockets");
+    for entry in detail.sockets() {
+        let _written = writeln!(
+            text,
+            "  {:<PROTOCOL_WIDTH$} {:<STATE_WIDTH$} {} → {}",
+            entry.protocol().label(),
+            entry.state().name(),
+            entry.local(),
+            entry.remote(),
+        );
+    }
+}
+
+fn push_limits(text: &mut String, detail: &ProcessDetail) {
+    let Ok(limits) = detail.limits() else {
+        return;
+    };
+    let _written = writeln!(text, "\nLimits (soft / hard)");
+    for name in LIMIT_NAMES {
+        if let Some(limit) = limits.iter().find(|limit| limit.name == name) {
+            let _written = writeln!(
+                text,
+                "  {:<20} {} / {} {}",
+                limit.name, limit.soft, limit.hard, limit.unit
+            );
+        }
+    }
+}
+
+// ----------------------------------------------------------------------- boot
+
+/// The Boot tab: the startup summary and the slowest units.
+///
+/// # Arguments
+///
+/// * `summary` - output of `systemd-analyze time`, or why it failed
+/// * `blame` - the per-unit startup times, or why they are unknown
+#[must_use]
+pub fn boot_report(summary: Result<&str, &str>, blame: Result<&StartupBlame, &str>) -> Report {
+    let mut lines = vec![line("Startup", ReportTone::Heading)];
+    match summary {
+        Ok(text) => lines.extend(
+            text.lines()
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| line(format!("  {text}"), ReportTone::Normal)),
+        ),
+        Err(reason) => lines.push(line(
+            format!("  systemd-analyze: {reason}"),
+            ReportTone::Bad,
+        )),
+    }
+
+    lines.push(line("Slowest units", ReportTone::Heading));
+    match blame {
+        Ok(blame) => {
+            for startup in blame.units().iter().take(MAX_STARTUP_ROWS) {
+                let tone = if startup.duration() >= SLOW_UNIT {
+                    ReportTone::Bad
+                } else if startup.duration() >= NOTICEABLE_UNIT {
+                    ReportTone::Normal
+                } else {
+                    ReportTone::Dim
+                };
+                lines.push(line(
+                    format!(
+                        "  {:>10}  {}",
+                        format_duration(startup.duration()),
+                        startup.unit()
+                    ),
+                    tone,
+                ));
+            }
+            if blame.units().len() > MAX_STARTUP_ROWS {
+                lines.push(line(
+                    format!(
+                        "  … {} more units",
+                        blame.units().len().saturating_sub(MAX_STARTUP_ROWS)
+                    ),
+                    ReportTone::Dim,
+                ));
+            }
+        }
+        Err(reason) => lines.push(line(
+            format!("  systemd-analyze blame: {reason}"),
+            ReportTone::Bad,
+        )),
+    }
+    Report { lines }
+}
+
+// ----------------------------------------------------------------------- logs
+
+fn journal_lines(
+    title: &str,
+    text: Result<&str, &str>,
+    tone: ReportTone,
+    lines: &mut Vec<ReportLine>,
+) {
+    lines.push(line(title, ReportTone::Heading));
+    match text {
+        Ok(text) if text.trim().is_empty() => lines.push(line("  none", ReportTone::Good)),
+        Ok(text) => lines.extend(text.lines().map(|entry| {
+            let tone = if entry.starts_with("-- ") {
+                ReportTone::Dim
+            } else {
+                tone
+            };
+            line(format!("  {entry}"), tone)
+        })),
+        Err(reason) => lines.push(line(format!("  journalctl: {reason}"), ReportTone::Bad)),
+    }
+}
+
+/// The Logs tab: errors and warnings of the system journal since boot.
+///
+/// # Arguments
+///
+/// * `errors` - emergency to error lines, or why they could not be read
+/// * `warnings` - warning lines, or why they could not be read
+#[must_use]
+pub fn logs_report(errors: Result<&str, &str>, warnings: Result<&str, &str>) -> Report {
+    let mut lines = Vec::new();
+    journal_lines("Errors since boot", errors, ReportTone::Bad, &mut lines);
+    journal_lines(
+        "Warnings since boot",
+        warnings,
+        ReportTone::Normal,
+        &mut lines,
+    );
+    Report { lines }
+}
+
+// ------------------------------------------------------------------------ gpu
+
+fn vendor_name(vendor: GpuVendor) -> String {
+    match vendor {
+        GpuVendor::Nvidia => "NVIDIA".to_owned(),
+        GpuVendor::Amd => "AMD".to_owned(),
+        GpuVendor::Intel => "Intel".to_owned(),
+        GpuVendor::Other(id) => format!("PCI vendor {id:#06x}"),
+    }
+}
+
+fn gpu_card_lines(card: &GpuCard, lines: &mut Vec<ReportLine>) {
+    let driver = card.driver.as_deref().unwrap_or("no driver");
+    lines.push(line(
+        format!("{} · {} · {driver}", vendor_name(card.vendor), card.name),
+        ReportTone::Heading,
+    ));
+    let missing = "n/a";
+    lines.push(line(
+        format!(
+            "  busy         {}",
+            card.utilization_percent
+                .map_or_else(|| missing.to_owned(), |percent| format!("{percent}%"))
+        ),
+        ReportTone::Normal,
+    ));
+    let memory = match (card.memory_used, card.memory_total) {
+        (Some(used), Some(total)) => {
+            format!(
+                "{used} / {total} ({}%)",
+                Permille::new(used.permille_of(total))
+            )
+        }
+        (Some(used), None) => format!("{used}"),
+        (None, Some(total)) => format!("{total} installed"),
+        (None, None) => missing.to_owned(),
+    };
+    lines.push(line(format!("  video memory {memory}"), ReportTone::Normal));
+    lines.push(line(
+        format!(
+            "  temperature  {}",
+            card.temperature.map_or_else(
+                || missing.to_owned(),
+                |degrees| format!("{}°C", degrees.rounded_degrees())
+            )
+        ),
+        ReportTone::Normal,
+    ));
+}
+
+/// The GPU tab.
+///
+/// # Arguments
+///
+/// * `report` - the cards found under `/sys/class/drm` and by `nvidia-smi`
+#[must_use]
+pub fn gpu_report(report: &GpuReport) -> Report {
+    let mut lines = Vec::new();
+    for card in report.cards() {
+        gpu_card_lines(card, &mut lines);
+    }
+    if report.cards().is_empty() {
+        lines.push(line(
+            "no graphics card found under /sys/class/drm",
+            ReportTone::Dim,
+        ));
+    }
+    if let Some(error) = report.nvidia_error() {
+        lines.push(line(format!("nvidia-smi: {error}"), ReportTone::Bad));
+    }
+    Report { lines }
+}
+
+// ----------------------------------------------------------------- containers
+
+#[derive(Default)]
+struct Totals {
+    processes: usize,
+    cpu: u64,
+    memory: u64,
+}
+
+fn totals_by_container(usage: &[ProcessUsage]) -> BTreeMap<&str, Totals> {
+    let mut totals: BTreeMap<&str, Totals> = BTreeMap::new();
+    for process in usage {
+        if let Some(id) = container_id_of_unit(&process.unit) {
+            let entry = totals.entry(id).or_default();
+            entry.processes = entry.processes.saturating_add(1);
+            entry.cpu = entry.cpu.saturating_add(process.cpu.get());
+            entry.memory = entry.memory.saturating_add(process.memory.get());
+        }
+    }
+    totals
+}
+
+fn usage_text(totals: Option<&Totals>) -> String {
+    totals.map_or_else(
+        || "no process visible".to_owned(),
+        |total| {
+            format!(
+                "{} processes · cpu {}% · mem {}",
+                total.processes,
+                Permille::new(total.cpu),
+                Bytes::new(total.memory)
+            )
+        },
+    )
+}
+
+/// The Containers tab: what each runtime lists, with the processes found in each container.
+///
+/// # Arguments
+///
+/// * `listings` - what every installed runtime answered
+/// * `usage` - CPU and memory of the running processes, matched to containers by their unit
+#[must_use]
+pub fn containers_report(listings: &[RuntimeListing], usage: &[ProcessUsage]) -> Report {
+    let totals = totals_by_container(usage);
+    let mut lines = Vec::new();
+    let mut listed_ids: Vec<String> = Vec::new();
+
+    for listing in listings {
+        lines.push(line(listing.runtime(), ReportTone::Heading));
+        match listing.containers() {
+            Ok(containers) if containers.is_empty() => {
+                lines.push(line("  no running containers", ReportTone::Dim));
+            }
+            Ok(containers) => {
+                for container in containers {
+                    let found = totals
+                        .iter()
+                        .find(|(full, _)| same_container(full, &container.id));
+                    listed_ids.push(container.id.clone());
+                    lines.push(line(
+                        format!(
+                            "  {} · {} · {}",
+                            container.name, container.id, container.status
+                        ),
+                        ReportTone::Good,
+                    ));
+                    lines.push(line(
+                        format!(
+                            "    {} · {}",
+                            container.image,
+                            usage_text(found.map(|(_, t)| t))
+                        ),
+                        ReportTone::Normal,
+                    ));
+                }
+            }
+            Err(error) => lines.push(line(format!("  {error}"), ReportTone::Bad)),
+        }
+    }
+    if listings.is_empty() {
+        lines.push(line(
+            "no container runtime found (looked for podman and docker)",
+            ReportTone::Dim,
+        ));
+    }
+
+    let mut unlisted: Vec<(&str, &Totals)> = totals
+        .iter()
+        .filter(|(full, _)| !listed_ids.iter().any(|short| same_container(full, short)))
+        .map(|(id, total)| (*id, total))
+        .collect();
+    unlisted.sort_by_key(|(_, total)| Reverse(total.memory));
+    if !unlisted.is_empty() {
+        lines.push(line(
+            "Container scopes seen in the process list",
+            ReportTone::Heading,
+        ));
+        for (id, total) in unlisted {
+            let short = id.get(..12).unwrap_or(id);
+            lines.push(line(
+                format!("  {short} · {}", usage_text(Some(total))),
+                ReportTone::Normal,
+            ));
+        }
+    }
+    Report { lines }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
+mod tests {
+    use borbatop_core::{
+        ContainerInfo, Pid, SocketProtocol, parse_socket_table, parse_startup_blame,
+    };
+    use borbatop_sources::{Connection, SocketOwner};
+
+    use super::*;
+
+    fn texts(report: &Report) -> Vec<&str> {
+        report.lines.iter().map(|line| line.text.as_str()).collect()
+    }
+
+    fn tone_of(report: &Report, needle: &str) -> ReportTone {
+        report
+            .lines
+            .iter()
+            .find(|line| line.text.contains(needle))
+            .unwrap_or_else(|| panic!("no line contains {needle:?}"))
+            .tone
+    }
+
+    #[test]
+    fn durations_read_like_systemd_prints_them() {
+        assert_eq!(format_duration(Duration::from_millis(889)), "889ms");
+        assert_eq!(format_duration(Duration::from_millis(5_240)), "5.2s");
+        assert_eq!(format_duration(Duration::from_millis(63_300)), "1min 3.3s");
+        assert_eq!(format_duration(Duration::from_secs(120)), "2min 0.0s");
+    }
+
+    #[test]
+    fn boot_lists_slow_units_loudly_and_keeps_the_summary() {
+        let blame = parse_startup_blame(
+            "6.253s wait-online.service\n 1.2s mid.service\n 45ms tiny.service\n",
+        );
+        let report = boot_report(Ok("Startup finished in 24.2s\n"), Ok(&blame));
+
+        assert_eq!(texts(&report)[0], "Startup");
+        assert!(texts(&report).contains(&"  Startup finished in 24.2s"));
+        assert_eq!(tone_of(&report, "wait-online"), ReportTone::Bad);
+        assert_eq!(tone_of(&report, "mid.service"), ReportTone::Normal);
+        assert_eq!(tone_of(&report, "tiny.service"), ReportTone::Dim);
+    }
+
+    #[test]
+    fn boot_failures_are_red_lines_not_missing_sections() {
+        let report = boot_report(Err("not found"), Err("not found"));
+        assert_eq!(
+            tone_of(&report, "systemd-analyze: not found"),
+            ReportTone::Bad
+        );
+        assert_eq!(tone_of(&report, "blame: not found"), ReportTone::Bad);
+    }
+
+    #[test]
+    fn logs_show_both_levels_and_empty_ones_as_good_news() {
+        let report = logs_report(
+            Ok(""),
+            Ok("Nov 21 10:00:00 host kernel: something odd\n-- Boot abc --\n"),
+        );
+        assert_eq!(texts(&report)[0], "Errors since boot");
+        assert_eq!(tone_of(&report, "none"), ReportTone::Good);
+        assert_eq!(tone_of(&report, "something odd"), ReportTone::Normal);
+        assert_eq!(tone_of(&report, "-- Boot"), ReportTone::Dim);
+
+        let failed = logs_report(Err("no access"), Ok(""));
+        assert_eq!(tone_of(&failed, "journalctl: no access"), ReportTone::Bad);
+    }
+
+    #[test]
+    fn gpu_cards_show_readings_and_n_a_for_what_is_missing() {
+        let card = GpuCard {
+            name: "GeForce".to_owned(),
+            vendor: GpuVendor::Nvidia,
+            driver: Some("nvidia".to_owned()),
+            utilization_percent: Some(28),
+            memory_used: Some(Bytes::new(1_073_741_824)),
+            memory_total: Some(Bytes::new(8_589_934_592)),
+            temperature: None,
+        };
+        let mut lines = Vec::new();
+        gpu_card_lines(&card, &mut lines);
+        let report = Report { lines };
+        assert_eq!(texts(&report)[0], "NVIDIA · GeForce · nvidia");
+        assert!(texts(&report).iter().any(|text| text.contains("28%")));
+        assert!(
+            texts(&report)
+                .iter()
+                .any(|text| text.contains("1.0G / 8.0G (12.5%)"))
+        );
+        assert!(
+            texts(&report)
+                .iter()
+                .any(|text| text.contains("temperature  n/a"))
+        );
+    }
+
+    #[test]
+    fn connections_list_listeners_first_with_their_owners() {
+        let table = parse_socket_table(
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 0A00A8C0:C350 0101A8C0:01BB 01 0:0 0:0 0 1000 0 5151 2\n   1: 0100007F:1F90 00000000:0000 0A 0:0 0:0 0 1000 0 4242 1\n",
+            SocketProtocol::Tcp4,
+        );
+        let [established, listener] = table.entries() else {
+            return assert_eq!(table.entries().len(), 2);
+        };
+        let report = ConnectionReport::new(
+            vec![
+                Connection::new(established.clone(), Vec::new()),
+                Connection::new(
+                    listener.clone(),
+                    vec![
+                        SocketOwner::new(Pid::new(42), "server"),
+                        SocketOwner::new(Pid::new(43), "worker"),
+                    ],
+                ),
+            ],
+            3,
+            1,
+        );
+
+        let shown = connections_report(&report);
+
+        assert_eq!(texts(&shown)[0], "2 sockets · 1 listening");
+        let rows = texts(&shown);
+        assert!(rows[2].contains("LISTEN") && rows[2].contains("127.0.0.1:8080"));
+        assert!(rows[2].ends_with("42 server +1"), "{}", rows[2]);
+        assert!(rows[3].contains("ESTAB") && rows[3].ends_with(NO_OWNER));
+        assert_eq!(shown.lines[2].tone, ReportTone::Good);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("3 processes cannot be inspected"))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("1 socket tables could not be read"))
+        );
+    }
+
+    fn container(id: &str, name: &str) -> ContainerInfo {
+        ContainerInfo {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            image: "docker.io/library/nginx".to_owned(),
+            status: "Up 3 hours".to_owned(),
+        }
+    }
+
+    fn usage(unit: &str, cpu: u64, memory: u64) -> ProcessUsage {
+        ProcessUsage {
+            unit: unit.to_owned(),
+            cpu: Permille::new(cpu),
+            memory: Bytes::new(memory),
+        }
+    }
+
+    #[test]
+    fn containers_total_the_processes_of_each_scope() {
+        let listings = [RuntimeListing::new(
+            "podman",
+            Ok(vec![container("0a1b2c3d4e5f", "web")]),
+        )];
+        let processes = [
+            usage("libpod-0a1b2c3d4e5f67890123.scope", 100, 1_048_576),
+            usage("libpod-0a1b2c3d4e5f67890123.scope", 50, 1_048_576),
+            usage("sshd.service", 10, 1),
+            usage("docker-ffffffffffff00000000.scope", 5, 2_097_152),
+        ];
+
+        let report = containers_report(&listings, &processes);
+        let rows = texts(&report);
+
+        assert_eq!(rows[0], "podman");
+        assert!(rows[1].contains("web") && rows[1].contains("0a1b2c3d4e5f"));
+        assert!(
+            rows[2].contains("2 processes")
+                && rows[2].contains("cpu 15.0%")
+                && rows[2].contains("mem 2.0M")
+        );
+        assert!(rows.contains(&"Container scopes seen in the process list"));
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("ffffffffffff") && row.contains("1 processes"))
+        );
+    }
+
+    #[test]
+    fn no_runtime_and_no_containers_have_their_own_messages() {
+        let none = containers_report(&[], &[]);
+        assert!(texts(&none)[0].contains("no container runtime found"));
+
+        let empty = containers_report(&[RuntimeListing::new("docker", Ok(Vec::new()))], &[]);
+        assert_eq!(texts(&empty), ["docker", "  no running containers"]);
+    }
+}

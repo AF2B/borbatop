@@ -4,6 +4,7 @@ mod cli;
 mod config;
 mod convert;
 mod model;
+mod reports;
 mod run;
 mod snapshot;
 mod worker;

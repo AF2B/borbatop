@@ -10,7 +10,7 @@ use borbatop_core::{
 };
 
 use crate::command::run;
-use crate::error::{Reading, SourceError};
+use crate::error::{CommandError, Reading, SourceError};
 
 const OSRELEASE: &str = "/proc/sys/kernel/osrelease";
 const KERNEL_MODULES: &str = "/usr/lib/modules";
@@ -20,6 +20,8 @@ const MAPS_FILE: &str = "maps";
 /// `pacman -Qu` and `-Qdtq` exit with 1 when the list is empty.
 const EMPTY_LIST_EXIT_CODE: i32 = 1;
 const MAX_CONFIG_DEPTH: usize = 8;
+/// AUR helpers that answer `-Qua` with the AUR packages that have a newer version.
+const AUR_HELPERS: [&str; 2] = ["yay", "paru"];
 
 /// Whether the running kernel matches what is installed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,10 +108,32 @@ impl StaleScan {
     }
 }
 
+/// Upgrades of packages built from the AUR, as an AUR helper reports them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AurUpgrades {
+    helper: &'static str,
+    upgrades: Vec<Upgrade>,
+}
+
+impl AurUpgrades {
+    /// The helper that answered (`yay` or `paru`).
+    #[must_use]
+    pub const fn helper(&self) -> &'static str {
+        self.helper
+    }
+
+    /// AUR packages with a newer version.
+    #[must_use]
+    pub fn upgrades(&self) -> &[Upgrade] {
+        &self.upgrades
+    }
+}
+
 /// Everything the Pacman tab shows, each part with its own success or failure.
 #[derive(Debug)]
 pub struct PacmanReport {
     upgrades: Reading<Vec<Upgrade>>,
+    aur: Reading<Option<AurUpgrades>>,
     orphans: Reading<Vec<String>>,
     kernel: Reading<KernelStatus>,
     pending_config: Reading<PendingConfig>,
@@ -122,6 +146,12 @@ impl PacmanReport {
     #[must_use]
     pub const fn upgrades(&self) -> &Reading<Vec<Upgrade>> {
         &self.upgrades
+    }
+
+    /// AUR upgrades; `None` when no AUR helper is installed. Needs network access.
+    #[must_use]
+    pub const fn aur(&self) -> &Reading<Option<AurUpgrades>> {
+        &self.aur
     }
 
     /// Packages installed as dependencies that nothing needs any more.
@@ -164,6 +194,7 @@ impl PacmanReport {
 pub fn collect_pacman_report(processes: &[(Pid, String)]) -> PacmanReport {
     PacmanReport {
         upgrades: read_upgrades(),
+        aur: read_aur(),
         orphans: read_orphans(),
         kernel: kernel_status(Path::new(OSRELEASE), Path::new(KERNEL_MODULES)),
         pending_config: scan_pending_config(Path::new(CONFIG_ROOT)),
@@ -175,6 +206,23 @@ pub fn collect_pacman_report(processes: &[(Pid, String)]) -> PacmanReport {
 fn read_upgrades() -> Reading<Vec<Upgrade>> {
     let output = run("pacman", &["-Qu"], &[EMPTY_LIST_EXIT_CODE]).map_err(SourceError::Command)?;
     parse_upgrades(&output).map_err(|error| SourceError::parse("pacman -Qu", error))
+}
+
+/// Asks the first installed AUR helper for upgrades; no helper is not a failure.
+fn read_aur() -> Reading<Option<AurUpgrades>> {
+    for helper in AUR_HELPERS {
+        match run(helper, &["-Qua"], &[EMPTY_LIST_EXIT_CODE]) {
+            Ok(output) => {
+                let upgrades = parse_upgrades(&output)
+                    .map_err(|error| SourceError::parse("AUR helper -Qua", error))?;
+                return Ok(Some(AurUpgrades { helper, upgrades }));
+            }
+            Err(CommandError::Spawn { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+            }
+            Err(error) => return Err(SourceError::Command(error)),
+        }
+    }
+    Ok(None)
 }
 
 fn read_orphans() -> Reading<Vec<String>> {

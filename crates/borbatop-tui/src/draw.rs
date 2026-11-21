@@ -1,6 +1,6 @@
 //! Rendering: turns the [`App`] state into ratatui widgets.
 
-use borbatop_core::{ActiveState, Permille, Pressure, UnitRow};
+use borbatop_core::{ActiveState, Permille, Pressure, UnitRow, Upgrade};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -8,11 +8,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use crate::app::{
-    App, InputMode, LogView, MessageKind, PacmanState, ProcessLayout, Visibility, VisibleRow,
+    App, Fetch, InputMode, LogView, MessageKind, PacmanState, ProcessLayout, Visibility, VisibleRow,
 };
 use crate::dialog::{Dialog, Tone};
 use crate::input::{SortKey, Tab};
-use crate::model::{Model, PacmanView, ProcessRow};
+use crate::model::{Model, PacmanView, ProcessRow, Report, ReportTone};
 use crate::mouse::{HitMap, ListRows, Run};
 use crate::theme::Theme;
 use crate::widgets::{Heat, bar_text, fit, fit_right, heat_of, safe, scale_of, sparkline};
@@ -53,6 +53,7 @@ const HEADER_INFO_WIDTH: u16 = 48;
 const HEADER_LOGO_WIDTH: u16 = 24;
 const COMMAND_TITLE_WIDTH: usize = 8;
 const SEPARATOR_WIDTH: usize = 1;
+const HINT_PADDING: usize = 2;
 const ALERT_MARK: &str = "⚠ ";
 const ALERT_SEPARATOR: &str = " · ";
 const JOURNAL_MARGIN_X: u16 = 4;
@@ -131,6 +132,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Tab::Services => draw_services(frame, body, app, &styles),
         Tab::Pacman => draw_pacman(frame, body, app, &styles),
         Tab::Io => draw_io(frame, body, app, &styles),
+        Tab::Connections | Tab::Boot | Tab::Logs | Tab::Gpu | Tab::Containers => {
+            draw_report(frame, body, app, &styles);
+        }
     }
     draw_status(frame, status, app, &styles);
 
@@ -757,11 +761,13 @@ fn pacman_lines<'a>(view: &PacmanView, styles: &Styles) -> Vec<Line<'a>> {
     lines
 }
 
-fn upgrade_lines<'a>(view: &PacmanView, styles: &Styles) -> Vec<Line<'a>> {
-    let mut lines = vec![section("Pending upgrades (synced database)", styles)];
-    match &view.upgrades {
-        Ok(upgrades) if upgrades.is_empty() => lines.push(Line::styled("  none", styles.ok)),
-        Ok(upgrades) => lines.extend(upgrades.iter().map(|upgrade| {
+fn upgrade_rows<'a>(upgrades: &[Upgrade], styles: &Styles) -> Vec<Line<'a>> {
+    if upgrades.is_empty() {
+        return vec![Line::styled("  none", styles.ok)];
+    }
+    upgrades
+        .iter()
+        .map(|upgrade| {
             Line::styled(
                 format!(
                     "  {:<32} {} → {}",
@@ -771,8 +777,29 @@ fn upgrade_lines<'a>(view: &PacmanView, styles: &Styles) -> Vec<Line<'a>> {
                 ),
                 styles.base,
             )
-        })),
+        })
+        .collect()
+}
+
+fn upgrade_lines<'a>(view: &PacmanView, styles: &Styles) -> Vec<Line<'a>> {
+    let mut lines = vec![section("Pending upgrades (synced database)", styles)];
+    match &view.upgrades {
+        Ok(upgrades) => lines.extend(upgrade_rows(upgrades, styles)),
         Err(reason) => lines.push(error_line("pacman -Qu", reason, styles)),
+    }
+    match &view.aur {
+        Ok(None) => {}
+        Ok(Some(aur)) => {
+            lines.push(section(
+                &format!("Pending AUR upgrades ({})", safe(&aur.helper)),
+                styles,
+            ));
+            lines.extend(upgrade_rows(&aur.upgrades, styles));
+        }
+        Err(reason) => {
+            lines.push(section("Pending AUR upgrades", styles));
+            lines.push(error_line("AUR helper", reason, styles));
+        }
     }
     lines
 }
@@ -889,6 +916,54 @@ fn draw_pacman(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
     draw_scrolling(frame, inner, lines, app, styles);
 }
 
+fn report_style(tone: ReportTone, styles: &Styles) -> Style {
+    match tone {
+        ReportTone::Heading => styles.accent,
+        ReportTone::Normal => styles.base,
+        ReportTone::Dim => styles.secondary,
+        ReportTone::Good => styles.ok,
+        ReportTone::Bad => styles.danger,
+    }
+}
+
+fn report_lines<'a>(report: &Report, styles: &Styles) -> Vec<Line<'a>> {
+    report
+        .lines
+        .iter()
+        .map(|line| {
+            let text = match line.tone {
+                ReportTone::Heading => line.text.to_uppercase(),
+                ReportTone::Normal | ReportTone::Dim | ReportTone::Good | ReportTone::Bad => {
+                    line.text.clone()
+                }
+            };
+            Line::styled(safe(&text), report_style(line.tone, styles))
+        })
+        .collect()
+}
+
+fn draw_report(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
+    let state = app.reports.get(&app.tab);
+    let title = if matches!(state, Some(Fetch::Loading)) {
+        format!("{} · loading…", app.tab.label())
+    } else {
+        app.tab.label().to_owned()
+    };
+    let block = panel(&title, styles);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines = match state {
+        Some(Fetch::Loaded(report)) => report_lines(report, styles),
+        Some(Fetch::Loading) => vec![Line::styled("reading…", styles.secondary)],
+        None => vec![Line::styled(
+            "press R to build the report",
+            styles.secondary,
+        )],
+    };
+    draw_scrolling(frame, inner, lines, app, styles);
+}
+
 fn rate_text(rate: Option<borbatop_core::BytesPerSecond>) -> String {
     rate.map_or_else(|| NOT_AVAILABLE.to_owned(), |rate| rate.to_string())
 }
@@ -997,6 +1072,7 @@ fn hints_for(tab: Tab) -> &'static [(&'static str, &'static str)] {
     match tab {
         Tab::Processes => &[
             ("↑↓", "move"),
+            ("⏎", "details"),
             ("s", "sort"),
             ("r", "reverse"),
             ("/", "filter"),
@@ -1018,10 +1094,43 @@ fn hints_for(tab: Tab) -> &'static [(&'static str, &'static str)] {
         ],
         Tab::Pacman => &[("↑↓", "scroll"), ("R", "refresh"), ("q", "quit")],
         Tab::Io => &[("↑↓", "scroll"), ("␣", "pause"), ("q", "quit")],
+        Tab::Connections | Tab::Boot | Tab::Logs | Tab::Gpu | Tab::Containers => {
+            &[("↑↓", "scroll"), ("R", "refresh"), ("q", "quit")]
+        }
     }
 }
 
-fn status_line<'a>(app: &App, styles: &Styles) -> Line<'a> {
+/// The width a hint takes on the status bar: ` key ` plus its text.
+fn hint_width(key: &str, text: &str) -> usize {
+    key.chars()
+        .count()
+        .saturating_add(text.chars().count())
+        .saturating_add(HINT_PADDING)
+}
+
+/// The hints that fit in `width`, most important first; the last one (quit) is always kept.
+fn fitting_hints(
+    hints: &'static [(&'static str, &'static str)],
+    width: usize,
+) -> Vec<(&'static str, &'static str)> {
+    let Some((last, leading)) = hints.split_last() else {
+        return Vec::new();
+    };
+    let mut room = width.saturating_sub(hint_width(last.0, last.1));
+    let mut kept = Vec::with_capacity(hints.len());
+    for &(key, text) in leading {
+        let needed = hint_width(key, text);
+        if needed > room {
+            break;
+        }
+        room = room.saturating_sub(needed);
+        kept.push((key, text));
+    }
+    kept.push(*last);
+    kept
+}
+
+fn status_line<'a>(app: &App, width: usize, styles: &Styles) -> Line<'a> {
     if app.input == InputMode::Filtering {
         return Line::from(vec![
             Span::styled(format!("/ {}", safe(&app.filter)), styles.accent),
@@ -1038,7 +1147,7 @@ fn status_line<'a>(app: &App, styles: &Styles) -> Line<'a> {
     }
 
     let mut spans: Vec<Span> = Vec::new();
-    for (key, text) in hints_for(app.tab) {
+    for (key, text) in fitting_hints(hints_for(app.tab), width) {
         spans.extend(key_hint(key, text, styles));
     }
     if !app.filter.is_empty() {
@@ -1052,7 +1161,7 @@ fn status_line<'a>(app: &App, styles: &Styles) -> Line<'a> {
 
 fn draw_status(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
     frame.render_widget(
-        Paragraph::new(status_line(app, styles)).style(styles.base),
+        Paragraph::new(status_line(app, to_width(area), styles)).style(styles.base),
         area,
     );
 }
@@ -1121,7 +1230,7 @@ fn draw_logs(frame: &mut Frame, logs: &LogView, styles: &Styles) {
         .border_style(styles.strong)
         .style(styles.base)
         .title(Span::styled(
-            format!(" JOURNAL · {} · Esc to close ", logs.unit),
+            format!(" {} · Esc to close ", logs.title),
             styles.accent,
         ));
     let inner = block.inner(area);
@@ -1361,6 +1470,7 @@ mod tests {
         assert!(screen(&app).to_lowercase().contains("reading pacman"));
         app.set_pacman(PacmanView {
             upgrades: Ok(Vec::new()),
+            aur: Ok(None),
             orphans: Ok(vec!["lld".to_owned(), "opencv".to_owned()]),
             kernel: Ok(KernelView {
                 running: "7.2.11-arch1-1".to_owned(),
@@ -1532,6 +1642,83 @@ mod tests {
     }
 
     #[test]
+    fn report_tabs_show_loading_then_the_report_with_hostile_text_defused() {
+        use crate::model::{Report, ReportLine, ReportTone};
+
+        let mut app = app();
+        app.handle_key(Key::Char('7'));
+        let loading = screen(&app);
+        assert!(loading.contains("LOGS · LOADING"), "{loading}");
+        assert!(loading.contains("reading…"));
+
+        app.set_report(
+            Tab::Logs,
+            Ok(Report {
+                lines: vec![
+                    ReportLine::new("Errors since boot", ReportTone::Heading),
+                    ReportLine::new("kernel: bad \u{1b}[2J thing", ReportTone::Bad),
+                ],
+            }),
+        );
+        let text = screen(&app);
+        assert!(
+            text.contains("ERRORS SINCE BOOT"),
+            "headings are upper-cased"
+        );
+        assert!(text.contains("kernel: bad"));
+        assert!(!text.contains('\u{1b}'));
+        assert!(!text.contains("loading"));
+    }
+
+    #[test]
+    fn hints_shrink_to_the_width_but_always_keep_quit() {
+        let hints = hints_for(Tab::Processes);
+        let full = fitting_hints(hints, 500);
+        assert_eq!(full.len(), hints.len());
+
+        for width in [10, 40, 60, 80, 100] {
+            let kept = fitting_hints(hints, width);
+            assert_eq!(kept.last(), Some(&("q", "quit")), "width {width}");
+            let used: usize = kept.iter().map(|(key, text)| hint_width(key, text)).sum();
+            assert!(
+                used <= width.max(hint_width("q", "quit")),
+                "width {width}: {used}"
+            );
+        }
+        assert!(fitting_hints(hints, 80).len() < hints.len());
+        assert_eq!(fitting_hints(&[], 80), []);
+    }
+
+    #[test]
+    fn every_tab_has_a_title_a_body_and_hints() {
+        let mut app = app();
+        for _ in 0..5 {
+            app.tick(); // let the "new alert" message fade so the hints show
+        }
+        for (index, tab) in Tab::ALL.into_iter().enumerate() {
+            app.handle_key(Key::Char(
+                char::from_digit(u32::try_from(index + 1).unwrap(), 10).unwrap(),
+            ));
+            assert_eq!(app.tab(), tab);
+            let text = screen(&app);
+            assert!(text.contains("BORBA"), "{tab:?} lost the logo");
+            assert!(text.contains("quit"), "{tab:?} lost the hints");
+        }
+    }
+
+    #[test]
+    fn the_process_detail_overlay_uses_its_own_title() {
+        let mut app = app();
+        app.set_overlay(
+            "PROCESS · PID 7 · tool".to_owned(),
+            Ok("Executable   /usr/bin/tool\nDescriptors  3 open".to_owned()),
+        );
+        let text = screen(&app);
+        assert!(text.contains("PROCESS · PID 7 · tool"));
+        assert!(text.contains("Descriptors  3 open"));
+    }
+
+    #[test]
     fn alerts_appear_in_the_header_and_vanish_when_calm() {
         let mut app = App::new(UiConfig::default());
         let calm = screen(&app);
@@ -1585,7 +1772,7 @@ mod tests {
         let lines: Vec<String> = (0..100)
             .map(|number| format!("journal line {number}"))
             .collect();
-        app.set_logs("cups.service".to_owned(), Ok(lines.join("\n")));
+        app.set_logs("cups.service", Ok(lines.join("\n")));
         let text = screen(&app);
         assert!(text.contains("JOURNAL · cups.service"));
         assert!(text.contains("journal line 99"));
@@ -1633,6 +1820,7 @@ mod tests {
             if key == '3' {
                 app.set_pacman(PacmanView {
                     upgrades: Ok(Vec::new()),
+                    aur: Ok(None),
                     orphans: Ok(vec![evil.to_owned()]),
                     kernel: Ok(KernelView {
                         running: evil.to_owned(),
@@ -1659,7 +1847,7 @@ mod tests {
         }
 
         app.handle_key(Key::Char('2'));
-        app.set_logs("x.service".to_owned(), Ok(format!("{evil}\nnormal line")));
+        app.set_logs("x.service", Ok(format!("{evil}\nnormal line")));
         app.handle_key(Key::Char('/'));
         app.handle_key(Key::Char('\x1b'));
         terminal.draw(|frame| draw(frame, &app)).unwrap();
@@ -1685,6 +1873,7 @@ mod tests {
             .collect();
         app.set_pacman(PacmanView {
             upgrades: Ok(Vec::new()),
+            aur: Ok(None),
             orphans: Ok(Vec::new()),
             kernel: Ok(KernelView {
                 running: "7".to_owned(),

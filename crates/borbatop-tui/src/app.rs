@@ -2,14 +2,14 @@
 
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use borbatop_core::{ActiveState, Pid, ProcessId, UnitRow, order_as_tree};
 
 use crate::alerts::{Alert, AlertThresholds, evaluate};
 use crate::dialog::{Dialog, DialogOutcome};
 use crate::input::{Command, Key, SortKey, Tab};
-use crate::model::{Model, PacmanView, ProcessRow};
+use crate::model::{Model, PacmanView, ProcessRow, Report, ReportLine, ReportTone};
 use crate::mouse::{HitMap, Mouse};
 use crate::theme::ThemeKind;
 use crate::widgets::safe;
@@ -98,7 +98,14 @@ impl Visibility {
 pub(crate) enum PacmanState {
     NotRequested,
     Loading,
-    Loaded(PacmanView),
+    Loaded(Box<PacmanView>),
+}
+
+/// Progress of a report that is loaded on demand; a tab with no entry was never requested.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Fetch<T> {
+    Loading,
+    Loaded(T),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,7 +117,7 @@ pub(crate) struct Message {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LogView {
-    pub(crate) unit: String,
+    pub(crate) title: String,
     pub(crate) lines: Vec<String>,
     pub(crate) failed: bool,
     /// Lines scrolled up from the newest one; 0 shows the end of the journal.
@@ -173,6 +180,7 @@ pub struct App {
     pub(crate) message: Option<Message>,
     pub(crate) alerts: Vec<Alert>,
     pub(crate) pacman: PacmanState,
+    pub(crate) reports: HashMap<Tab, Fetch<Report>>,
     pub(crate) scroll: usize,
     /// Largest useful scroll offset, learned while drawing.
     pub(crate) max_scroll: Cell<usize>,
@@ -219,6 +227,7 @@ impl App {
             message: None,
             alerts: Vec::new(),
             pacman: PacmanState::NotRequested,
+            reports: HashMap::new(),
             scroll: 0,
             max_scroll: Cell::new(0),
             hits: RefCell::new(HitMap::default()),
@@ -268,7 +277,7 @@ impl App {
     ///
     /// * `view` - the report
     pub fn set_pacman(&mut self, view: PacmanView) {
-        self.pacman = PacmanState::Loaded(view);
+        self.pacman = PacmanState::Loaded(Box::new(view));
     }
 
     /// Opens the journal overlay for `unit`.
@@ -277,17 +286,40 @@ impl App {
     ///
     /// * `unit` - unit the text belongs to
     /// * `result` - journal text, or why it could not be read
-    pub fn set_logs(&mut self, unit: String, result: Result<String, String>) {
+    pub fn set_logs(&mut self, unit: &str, result: Result<String, String>) {
+        self.set_overlay(format!("JOURNAL · {unit}"), result);
+    }
+
+    /// Opens the text overlay with a title and a body, or the reason there is none.
+    ///
+    /// # Arguments
+    ///
+    /// * `title` - what the text is about
+    /// * `result` - the text, or why it could not be produced
+    pub fn set_overlay(&mut self, title: String, result: Result<String, String>) {
         let (lines, failed) = match result {
             Ok(text) => (text.lines().map(safe).collect(), false),
             Err(reason) => (vec![safe(&reason)], true),
         };
         self.logs = Some(LogView {
-            unit,
+            title,
             lines,
             failed,
             scroll: 0,
         });
+    }
+
+    /// Stores a freshly built report of an on-demand tab; a failure becomes one red line.
+    ///
+    /// # Arguments
+    ///
+    /// * `tab` - the tab the report belongs to
+    /// * `result` - the report, or why it could not be built
+    pub fn set_report(&mut self, tab: Tab, result: Result<Report, String>) {
+        let report = result.unwrap_or_else(|reason| Report {
+            lines: vec![ReportLine::new(reason, ReportTone::Bad)],
+        });
+        self.reports.insert(tab, Fetch::Loaded(report));
     }
 
     /// Shows a message in the status bar for a few ticks.
@@ -322,6 +354,12 @@ impl App {
     #[must_use]
     pub const fn is_paused(&self) -> bool {
         matches!(self.playback, Playback::Paused)
+    }
+
+    /// Whether the report of `tab` is being built.
+    #[must_use]
+    pub fn is_report_loading(&self, tab: Tab) -> bool {
+        matches!(self.reports.get(&tab), Some(Fetch::Loading))
     }
 
     /// Whether the Pacman report is being rebuilt.
@@ -391,7 +429,8 @@ impl App {
                 self.filter.clear();
                 None
             }
-            Key::Enter | Key::Backspace => None,
+            Key::Enter => self.request_detail(),
+            Key::Backspace => None,
         }
     }
 
@@ -482,7 +521,13 @@ impl App {
                     self.selected_unit = name;
                 }
             }
-            Tab::Pacman | Tab::Io => {}
+            Tab::Pacman
+            | Tab::Io
+            | Tab::Connections
+            | Tab::Boot
+            | Tab::Logs
+            | Tab::Gpu
+            | Tab::Containers => {}
         }
     }
 
@@ -536,7 +581,7 @@ impl App {
             'n' => self.open_nice_dialog(),
             'c' => self.open_affinity_dialog(),
             'a' => self.open_service_dialog(),
-            'R' => self.request_pacman(),
+            'R' => self.request_reload(),
             'l' => self.request_logs(),
             digit => {
                 let position = digit
@@ -557,7 +602,27 @@ impl App {
         if tab == Tab::Pacman && self.pacman == PacmanState::NotRequested {
             return self.request_pacman();
         }
+        if tab.is_report() && !self.reports.contains_key(&tab) {
+            return self.request_report(tab);
+        }
         None
+    }
+
+    /// Rebuilds the report of the tab being shown, if it has one.
+    fn request_reload(&mut self) -> Option<Command> {
+        if self.tab.is_report() {
+            self.request_report(self.tab)
+        } else {
+            self.request_pacman()
+        }
+    }
+
+    fn request_report(&mut self, tab: Tab) -> Option<Command> {
+        if self.is_report_loading(tab) {
+            return None;
+        }
+        self.reports.insert(tab, Fetch::Loading);
+        Some(Command::LoadReport(tab))
     }
 
     fn request_pacman(&mut self) -> Option<Command> {
@@ -566,6 +631,21 @@ impl App {
         }
         self.pacman = PacmanState::Loading;
         Some(Command::RefreshPacman)
+    }
+
+    /// Asks for everything known about the selected process.
+    fn request_detail(&self) -> Option<Command> {
+        let process = self.selected_process()?;
+        let program = process
+            .command
+            .split_whitespace()
+            .next()
+            .and_then(|path| path.rsplit('/').next())
+            .unwrap_or_default();
+        Some(Command::LoadDetail {
+            id: ProcessId::new(process.pid, process.start_time),
+            label: format!("PID {} · {}", process.pid, program),
+        })
     }
 
     fn request_logs(&mut self) -> Option<Command> {
@@ -682,7 +762,13 @@ impl App {
         match self.tab {
             Tab::Processes => self.move_process_selection(delta),
             Tab::Services => self.move_service_selection(delta),
-            Tab::Pacman | Tab::Io => {
+            Tab::Pacman
+            | Tab::Io
+            | Tab::Connections
+            | Tab::Boot
+            | Tab::Logs
+            | Tab::Gpu
+            | Tab::Containers => {
                 self.scroll = self
                     .scroll
                     .saturating_add_signed(delta)
@@ -1042,6 +1128,61 @@ mod tests {
     }
 
     #[test]
+    fn report_tabs_request_once_and_reload_on_demand() {
+        let mut app = app_with(vec![]);
+        assert_eq!(
+            app.handle_key(Key::Char('5')),
+            Some(Command::LoadReport(Tab::Connections))
+        );
+        assert!(app.is_report_loading(Tab::Connections));
+        assert_eq!(app.handle_key(Key::Char('R')), None, "already loading");
+
+        app.set_report(Tab::Connections, Ok(Report::default()));
+        assert!(!app.is_report_loading(Tab::Connections));
+        app.handle_key(Key::Char('1'));
+        assert_eq!(
+            app.handle_key(Key::Char('5')),
+            None,
+            "a loaded report is kept"
+        );
+        assert_eq!(
+            app.handle_key(Key::Char('R')),
+            Some(Command::LoadReport(Tab::Connections))
+        );
+    }
+
+    #[test]
+    fn a_failed_report_becomes_one_red_line() {
+        let mut app = app_with(vec![]);
+        app.set_report(Tab::Gpu, Err("no card".to_owned()));
+        assert_eq!(
+            app.reports.get(&Tab::Gpu),
+            Some(&Fetch::Loaded(Report {
+                lines: vec![ReportLine::new("no card", ReportTone::Bad)],
+            }))
+        );
+    }
+
+    #[test]
+    fn enter_asks_for_the_details_of_the_selected_process() {
+        let mut app = app_with(vec![row(7, 0, 5, "/usr/bin/victim --flag")]);
+        assert_eq!(
+            app.handle_key(Key::Enter),
+            Some(Command::LoadDetail {
+                id: ProcessId::new(Pid::new(7), borbatop_core::StartTime::new(1)),
+                label: "PID 7 · victim".to_owned(),
+            })
+        );
+
+        app.handle_key(Key::Char('2'));
+        assert_eq!(
+            app.handle_key(Key::Enter),
+            None,
+            "only the process tab has details"
+        );
+    }
+
+    #[test]
     fn lists_are_recomputed_only_when_their_inputs_change() {
         let mut app = app_with(vec![row(1, 0, 10, "alpha"), row(2, 0, 900, "zeta")]);
         let baseline = app.list_computations.get();
@@ -1207,13 +1348,15 @@ mod tests {
     fn tab_keys_cycle_and_digits_jump() {
         let mut app = app_with(vec![]);
         app.handle_key(Key::BackTab);
-        assert_eq!(app.tab(), Tab::Io);
+        assert_eq!(app.tab(), Tab::Containers);
         app.handle_key(Key::Tab);
         assert_eq!(app.tab(), Tab::Processes);
         app.handle_key(Key::Char('2'));
         assert_eq!(app.tab(), Tab::Services);
         app.handle_key(Key::Char('9'));
-        assert_eq!(app.tab(), Tab::Services);
+        assert_eq!(app.tab(), Tab::Containers);
+        app.handle_key(Key::Char('0'));
+        assert_eq!(app.tab(), Tab::Containers, "there is no tab 0");
     }
 
     #[test]
@@ -1238,7 +1381,7 @@ mod tests {
         );
         app.handle_key(Key::Down);
         assert_eq!(app.selected_unit.as_deref(), Some("a.service"));
-        app.set_logs("z.service".to_owned(), Ok("line 1\nline 2".to_owned()));
+        app.set_logs("z.service", Ok("line 1\nline 2".to_owned()));
         assert_eq!(app.logs.as_ref().unwrap().lines.len(), 2);
         app.handle_key(Key::Escape);
         assert!(app.logs.is_none());

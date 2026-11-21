@@ -32,7 +32,7 @@ pub enum Key {
 }
 
 /// A screen of the program.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     /// Process table.
     Processes,
@@ -42,11 +42,31 @@ pub enum Tab {
     Pacman,
     /// Network, disks and mounts.
     Io,
+    /// Open sockets and the processes that own them.
+    Connections,
+    /// Startup time per unit.
+    Boot,
+    /// Warnings and errors of the system journal.
+    Logs,
+    /// Graphics cards.
+    Gpu,
+    /// Containers and the processes in them.
+    Containers,
 }
 
 impl Tab {
     /// Every tab, in display order.
-    pub const ALL: [Self; 4] = [Self::Processes, Self::Services, Self::Pacman, Self::Io];
+    pub const ALL: [Self; 9] = [
+        Self::Processes,
+        Self::Services,
+        Self::Pacman,
+        Self::Io,
+        Self::Connections,
+        Self::Boot,
+        Self::Logs,
+        Self::Gpu,
+        Self::Containers,
+    ];
 
     /// Name shown in the tab bar.
     #[must_use]
@@ -56,6 +76,20 @@ impl Tab {
             Self::Services => "Services",
             Self::Pacman => "Pacman",
             Self::Io => "Network · Disk",
+            Self::Connections => "Connections",
+            Self::Boot => "Boot",
+            Self::Logs => "Logs",
+            Self::Gpu => "GPU",
+            Self::Containers => "Containers",
+        }
+    }
+
+    /// Whether the tab shows a [`crate::Report`] loaded on demand.
+    #[must_use]
+    pub const fn is_report(self) -> bool {
+        match self {
+            Self::Connections | Self::Boot | Self::Logs | Self::Gpu | Self::Containers => true,
+            Self::Processes | Self::Services | Self::Pacman | Self::Io => false,
         }
     }
 
@@ -67,6 +101,11 @@ impl Tab {
             Self::Services => 1,
             Self::Pacman => 2,
             Self::Io => 3,
+            Self::Connections => 4,
+            Self::Boot => 5,
+            Self::Logs => 6,
+            Self::Gpu => 7,
+            Self::Containers => 8,
         }
     }
 
@@ -237,6 +276,15 @@ pub enum Command {
         /// What to do.
         action: ServiceAction,
     },
+    /// Show everything known about one process.
+    LoadDetail {
+        /// Process to inspect: PID plus start time.
+        id: ProcessId,
+        /// Short name for the overlay title.
+        label: String,
+    },
+    /// Build the report of a tab that loads on demand.
+    LoadReport(Tab),
     /// Rebuild the Pacman report.
     RefreshPacman,
     /// Fetch the journal of a unit.
@@ -253,9 +301,10 @@ mod tests {
     #[test]
     fn tabs_wrap_in_both_directions() {
         assert_eq!(Tab::wrapping(0), Tab::Processes);
-        assert_eq!(Tab::wrapping(-1), Tab::Io);
-        assert_eq!(Tab::wrapping(4), Tab::Processes);
-        assert_eq!(Tab::wrapping(6), Tab::Pacman);
+        assert_eq!(Tab::wrapping(-1), Tab::Containers);
+        assert_eq!(Tab::wrapping(9), Tab::Processes);
+        assert_eq!(Tab::wrapping(11), Tab::Pacman);
+        assert_eq!(Tab::ALL.iter().filter(|tab| tab.is_report()).count(), 5);
         for tab in Tab::ALL {
             assert_eq!(Tab::ALL.get(tab.index()), Some(&tab));
         }

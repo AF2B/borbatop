@@ -128,11 +128,22 @@ pub struct StaleView {
     pub library: String,
 }
 
+/// Upgrades of AUR packages and the helper that found them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AurView {
+    /// Helper that answered, for example `yay`.
+    pub helper: String,
+    /// AUR packages with a newer version.
+    pub upgrades: Vec<Upgrade>,
+}
+
 /// Everything the Pacman tab shows; each part may have failed on its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PacmanView {
     /// Pending upgrades, or why they are unknown.
     pub upgrades: Result<Vec<Upgrade>, String>,
+    /// AUR upgrades, nothing when no AUR helper is installed, or why they are unknown.
+    pub aur: Result<Option<AurView>, String>,
     /// Orphaned packages, or why they are unknown.
     pub orphans: Result<Vec<String>, String>,
     /// Kernel status, or why it is unknown.
@@ -145,6 +156,53 @@ pub struct PacmanView {
     pub stale: Vec<StaleView>,
     /// Processes that could not be inspected.
     pub stale_unreadable: usize,
+}
+
+/// How a line of a [`Report`] should look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportTone {
+    /// A section title.
+    Heading,
+    /// Ordinary text.
+    Normal,
+    /// Secondary text.
+    Dim,
+    /// Something that is fine.
+    Good,
+    /// Something that needs attention.
+    Bad,
+}
+
+/// One line of a [`Report`]: text already formatted for the screen, and how loud it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportLine {
+    /// The text; control characters are replaced when drawn.
+    pub text: String,
+    /// How it should look.
+    pub tone: ReportTone,
+}
+
+impl ReportLine {
+    /// A line with the given tone.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - what to show
+    /// * `tone` - how loud it is
+    #[must_use]
+    pub fn new(text: impl Into<String>, tone: ReportTone) -> Self {
+        Self {
+            text: text.into(),
+            tone,
+        }
+    }
+}
+
+/// The content of a tab that is built on demand: ready-to-draw lines.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Report {
+    /// Lines, top to bottom.
+    pub lines: Vec<ReportLine>,
 }
 
 /// Everything the screen shows for one sample.

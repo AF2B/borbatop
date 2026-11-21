@@ -5,7 +5,7 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
-use borbatop_core::{CpuStatError, ZeroPageSize};
+use borbatop_core::{CpuStatError, Pid, ZeroPageSize};
 
 /// Boxed cause of a parse failure, kept so the original error is never flattened to text.
 pub type ParseCause = Box<dyn Error + Send + Sync + 'static>;
@@ -33,6 +33,8 @@ pub enum SourceError {
     PageSize(ZeroPageSize),
     /// An external command could not be run or failed.
     Command(CommandError),
+    /// The process exited, or its PID now belongs to a different process.
+    ProcessGone(Pid),
 }
 
 impl SourceError {
@@ -68,6 +70,7 @@ impl fmt::Display for SourceError {
             }
             Self::PageSize(error) => error.fmt(formatter),
             Self::Command(error) => error.fmt(formatter),
+            Self::ProcessGone(pid) => write!(formatter, "process {pid} is gone"),
         }
     }
 }
@@ -80,6 +83,7 @@ impl Error for SourceError {
             Self::Parse { source, .. } => Some(source.as_ref()),
             Self::PageSize(error) => Some(error),
             Self::Command(error) => Some(error),
+            Self::ProcessGone(_) => None,
         }
     }
 }

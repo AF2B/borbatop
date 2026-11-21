@@ -3,7 +3,12 @@
 //! All I/O of borbatop lives here and is turned into the pure types of `borbatop-core`.
 
 mod command;
+mod connections;
+mod containers;
+mod detail;
+mod diagnostics;
 mod error;
+mod gpu;
 mod identity;
 mod owners;
 mod pacman;
@@ -14,10 +19,16 @@ mod statics;
 mod system;
 mod units;
 
+pub use connections::{Connection, ConnectionReport, SocketOwner, collect_connections};
+pub use containers::{RuntimeListing, list_containers};
+pub use detail::{OpenDescriptor, ProcessDetail, process_detail};
+pub use diagnostics::{JournalLevel, startup_blame, startup_summary, system_journal};
 pub use error::{CommandError, ParseCause, Reading, SourceError};
+pub use gpu::{GpuReport, collect_gpus};
 pub use owners::{FileOwners, PACMAN_LOCAL_DB};
 pub use pacman::{
-    KernelStatus, PacmanReport, PendingConfig, StaleProcess, StaleScan, collect_pacman_report,
+    AurUpgrades, KernelStatus, PacmanReport, PendingConfig, StaleProcess, StaleScan,
+    collect_pacman_report,
 };
 pub use proc::{ProcCollector, ProcessFailure, ProcessFailureCause, ProcessRecord, Snapshot};
 pub use schedule::{ScheduleError, set_affinity, set_nice};

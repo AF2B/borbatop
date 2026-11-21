@@ -19,7 +19,8 @@ pub use app::{App, MessageKind, UiConfig};
 pub use draw::{WORDMARK, draw};
 pub use input::{Command, Key, ServiceAction, SignalChoice, SortKey, Tab};
 pub use model::{
-    DiskRow, KernelView, Model, MountRow, NetRow, PacmanView, PressureView, ProcessRow, StaleView,
+    AurView, DiskRow, KernelView, Model, MountRow, NetRow, PacmanView, PressureView, ProcessRow,
+    Report, ReportLine, ReportTone, StaleView,
 };
 pub use mouse::Mouse;
 pub use terminal::{is_interrupt, key_from_event, mouse_from_event};

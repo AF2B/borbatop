@@ -16,7 +16,11 @@ use ratatui::crossterm::execute;
 
 use crate::config::Settings;
 use crate::convert::{signal_of, unit_action_of};
-use crate::worker::{WorkerEvent, spawn_logs, spawn_pacman, spawn_sampler, spawn_unit_action};
+use crate::reports::ProcessUsage;
+use crate::worker::{
+    WorkerEvent, spawn_detail, spawn_logs, spawn_pacman, spawn_report, spawn_sampler,
+    spawn_unit_action,
+};
 
 const INPUT_POLL: Duration = Duration::from_millis(100);
 
@@ -109,7 +113,9 @@ fn apply(update: WorkerEvent, app: &mut App) {
         }
         WorkerEvent::Failure(reason) => app.notify(reason, MessageKind::Error),
         WorkerEvent::Pacman(view) => app.set_pacman(*view),
-        WorkerEvent::Logs { unit, result } => app.set_logs(unit, result),
+        WorkerEvent::Logs { unit, result } => app.set_logs(&unit, result),
+        WorkerEvent::Overlay { title, result } => app.set_overlay(title, result),
+        WorkerEvent::Report { tab, result } => app.set_report(tab, result),
         WorkerEvent::Outcome(Ok(text)) => app.notify(text, MessageKind::Info),
         WorkerEvent::Outcome(Err(text)) => app.notify(text, MessageKind::Error),
     }
@@ -126,6 +132,32 @@ fn execute(command: Command, app: &mut App, events: &Sender<WorkerEvent>) -> boo
             if let Err(error) = spawn_unit_action(events.clone(), unit, unit_action_of(action)) {
                 app.notify(
                     format!("cannot start systemctl: {error}"),
+                    MessageKind::Error,
+                );
+            }
+        }
+        Command::LoadDetail { id, label } => {
+            if let Err(error) = spawn_detail(events.clone(), id, label) {
+                app.notify(
+                    format!("cannot read process details: {error}"),
+                    MessageKind::Error,
+                );
+            }
+        }
+        Command::LoadReport(tab) => {
+            let usage = app
+                .model()
+                .processes
+                .iter()
+                .map(|process| ProcessUsage {
+                    unit: process.unit.clone(),
+                    cpu: process.cpu,
+                    memory: process.memory,
+                })
+                .collect();
+            if let Err(error) = spawn_report(events.clone(), tab, usage) {
+                app.notify(
+                    format!("cannot build the {} report: {error}", tab.label()),
                     MessageKind::Error,
                 );
             }

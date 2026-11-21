@@ -6,18 +6,25 @@ use std::io;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread;
 
-use borbatop_core::Pid;
+use borbatop_core::{Pid, ProcessId};
 use borbatop_sources::{
-    SystemCollector, UnitAction, collect_pacman_report, control_unit, list_units, unit_logs,
+    JournalLevel, SystemCollector, UnitAction, collect_connections, collect_gpus,
+    collect_pacman_report, control_unit, list_containers, list_units, process_detail,
+    startup_blame, startup_summary, system_journal, unit_logs,
 };
-use borbatop_tui::{Model, PacmanView};
+use borbatop_tui::{Model, PacmanView, Report, Tab};
 
 use crate::config::Settings;
 use crate::convert::pacman_view;
 use crate::model::ModelBuilder;
+use crate::reports::{
+    ProcessUsage, boot_report, connections_report, containers_report, detail_text, gpu_report,
+    logs_report,
+};
 
 const SERVICES_EVERY_SAMPLES: u32 = 5;
 const JOURNAL_LINES: u16 = 300;
+const SYSTEM_JOURNAL_LINES: u16 = 100;
 const OSRELEASE: &str = "/proc/sys/kernel/osrelease";
 
 /// What a background thread reports to the screen.
@@ -37,6 +44,20 @@ pub enum WorkerEvent {
     },
     /// The outcome of an action: a confirmation, or why it failed.
     Outcome(Result<String, String>),
+    /// Text for the overlay: everything known about one process, or why it is unknown.
+    Overlay {
+        /// What the text is about.
+        title: String,
+        /// The text, or the failure message.
+        result: Result<String, String>,
+    },
+    /// The report of an on-demand tab.
+    Report {
+        /// The tab it belongs to.
+        tab: Tab,
+        /// The report, or why it could not be built.
+        result: Result<Report, String>,
+    },
 }
 
 /// Keeps the sampler running; dropping it asks the thread to stop.
@@ -142,6 +163,90 @@ pub fn spawn_logs(events: Sender<WorkerEvent>, unit: String) -> io::Result<()> {
         .map(|_handle| ())
 }
 
+/// Reads everything known about one process on its own thread.
+///
+/// # Arguments
+///
+/// * `events` - where the text is sent
+/// * `id` - process to inspect: PID plus start time
+/// * `label` - short name for the overlay title
+///
+/// # Errors
+///
+/// Returns the OS error if the thread cannot be created.
+pub fn spawn_detail(events: Sender<WorkerEvent>, id: ProcessId, label: String) -> io::Result<()> {
+    thread::Builder::new()
+        .name("borbatop-detail".to_owned())
+        .spawn(move || {
+            let result = process_detail(id)
+                .map(|detail| detail_text(&detail))
+                .map_err(|error| error.to_string());
+            let _delivered = events.send(WorkerEvent::Overlay {
+                title: format!("PROCESS · {label}"),
+                result,
+            });
+        })
+        .map(|_handle| ())
+}
+
+/// Builds the report of an on-demand tab on its own thread.
+///
+/// # Arguments
+///
+/// * `events` - where the report is sent
+/// * `tab` - the tab to build
+/// * `usage` - the running processes, to total up per container
+///
+/// # Errors
+///
+/// Returns the OS error if the thread cannot be created.
+pub fn spawn_report(
+    events: Sender<WorkerEvent>,
+    tab: Tab,
+    usage: Vec<ProcessUsage>,
+) -> io::Result<()> {
+    thread::Builder::new()
+        .name("borbatop-report".to_owned())
+        .spawn(move || {
+            let result = build_report(tab, &usage);
+            let _delivered = events.send(WorkerEvent::Report { tab, result });
+        })
+        .map(|_handle| ())
+}
+
+fn borrowed(result: &Result<String, String>) -> Result<&str, &str> {
+    result.as_ref().map(String::as_str).map_err(String::as_str)
+}
+
+fn build_report(tab: Tab, usage: &[ProcessUsage]) -> Result<Report, String> {
+    match tab {
+        Tab::Connections => collect_connections()
+            .map(|report| connections_report(&report))
+            .map_err(|error| error.to_string()),
+        Tab::Boot => {
+            let summary = startup_summary().map_err(|error| error.to_string());
+            let blame = startup_blame().map_err(|error| error.to_string());
+            Ok(boot_report(
+                borrowed(&summary),
+                blame.as_ref().map_err(String::as_str),
+            ))
+        }
+        Tab::Logs => {
+            let journal = |level| {
+                system_journal(level, SYSTEM_JOURNAL_LINES).map_err(|error| error.to_string())
+            };
+            let errors = journal(JournalLevel::Errors);
+            let warnings = journal(JournalLevel::Warnings);
+            Ok(logs_report(borrowed(&errors), borrowed(&warnings)))
+        }
+        Tab::Gpu => Ok(gpu_report(&collect_gpus())),
+        Tab::Containers => Ok(containers_report(&list_containers(), usage)),
+        Tab::Processes | Tab::Services | Tab::Pacman | Tab::Io => {
+            Err(format!("{} has no on-demand report", tab.label()))
+        }
+    }
+}
+
 /// Runs a start, stop or restart on its own thread: `systemctl` can take seconds.
 ///
 /// # Arguments
@@ -203,9 +308,11 @@ mod tests {
             match received.recv_timeout(PATIENCE).unwrap() {
                 WorkerEvent::Model(model) => assert_ne!(model.processes.len(), 0),
                 WorkerEvent::Failure(reason) => panic!("sampler failed: {reason}"),
-                WorkerEvent::Pacman(_) | WorkerEvent::Logs { .. } | WorkerEvent::Outcome(_) => {
-                    panic!("unexpected event")
-                }
+                WorkerEvent::Pacman(_)
+                | WorkerEvent::Logs { .. }
+                | WorkerEvent::Outcome(_)
+                | WorkerEvent::Overlay { .. }
+                | WorkerEvent::Report { .. } => panic!("unexpected event"),
             }
         }
         drop(handle);
@@ -231,6 +338,40 @@ mod tests {
     }
 
     #[test]
+    fn every_on_demand_tab_builds_a_report_on_this_machine() {
+        for tab in Tab::ALL.into_iter().filter(|tab| tab.is_report()) {
+            let report = build_report(tab, &[]).unwrap();
+            assert!(!report.lines.is_empty(), "{} is empty", tab.label());
+        }
+        assert!(build_report(Tab::Processes, &[]).is_err());
+    }
+
+    #[test]
+    fn process_detail_arrives_as_an_overlay_event() {
+        let (events, received) = channel();
+        let me = borbatop_core::Pid::new(std::process::id());
+        let sample = std::fs::read_to_string(format!("/proc/{me}/stat")).unwrap();
+        let id = borbatop_core::parse_process_stat(&sample).unwrap().id();
+
+        spawn_detail(events, id, "me".to_owned()).unwrap();
+
+        match received.recv_timeout(PATIENCE).unwrap() {
+            WorkerEvent::Overlay { title, result } => {
+                assert_eq!(title, "PROCESS · me");
+                let text = result.unwrap();
+                assert!(text.contains("Executable"), "{text}");
+                assert!(text.contains("Descriptors"), "{text}");
+            }
+            WorkerEvent::Model(_)
+            | WorkerEvent::Failure(_)
+            | WorkerEvent::Pacman(_)
+            | WorkerEvent::Logs { .. }
+            | WorkerEvent::Outcome(_)
+            | WorkerEvent::Report { .. } => panic!("unexpected event"),
+        }
+    }
+
+    #[test]
     fn an_invalid_unit_name_is_reported_as_a_failed_outcome() {
         let (events, received) = channel();
         spawn_unit_action(events, "--bad".to_owned(), UnitAction::Stop).unwrap();
@@ -242,7 +383,9 @@ mod tests {
             WorkerEvent::Model(_)
             | WorkerEvent::Failure(_)
             | WorkerEvent::Pacman(_)
-            | WorkerEvent::Logs { .. } => panic!("unexpected event"),
+            | WorkerEvent::Logs { .. }
+            | WorkerEvent::Overlay { .. }
+            | WorkerEvent::Report { .. } => panic!("unexpected event"),
         }
     }
 
@@ -258,7 +401,9 @@ mod tests {
             WorkerEvent::Model(_)
             | WorkerEvent::Failure(_)
             | WorkerEvent::Pacman(_)
-            | WorkerEvent::Outcome(_) => panic!("unexpected event"),
+            | WorkerEvent::Outcome(_)
+            | WorkerEvent::Overlay { .. }
+            | WorkerEvent::Report { .. } => panic!("unexpected event"),
         }
     }
 }
