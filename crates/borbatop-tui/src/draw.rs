@@ -12,7 +12,7 @@ use crate::app::{
 };
 use crate::dialog::{Dialog, Tone};
 use crate::input::{SortKey, Tab};
-use crate::model::{ContainerView, Model, PacmanView, ProcessRow, Report, ReportTone};
+use crate::model::{ContainerView, Model, PacmanView, ProcessRow, RepoSource, Report, ReportTone};
 use crate::mouse::{HitMap, ListRows, Run};
 use crate::theme::Theme;
 use crate::widgets::{Heat, bar_text, fit, fit_right, heat_of, safe, scale_of, sparkline};
@@ -794,23 +794,25 @@ fn upgrade_rows<'a>(upgrades: &[Upgrade], styles: &Styles) -> Vec<Line<'a>> {
 }
 
 fn upgrade_lines<'a>(view: &PacmanView, styles: &Styles) -> Vec<Line<'a>> {
-    let mut lines = vec![section("Pending upgrades (synced database)", styles)];
+    let title = match view.repo_source {
+        RepoSource::Checkupdates => "Pending upgrades (checkupdates: fresh list)",
+        RepoSource::LocalDatabase => {
+            "Pending upgrades (local database: may be stale, run checkupdates or pacman -Sy)"
+        }
+    };
+    let mut lines = vec![section(title, styles)];
     match &view.upgrades {
         Ok(upgrades) => lines.extend(upgrade_rows(upgrades, styles)),
         Err(reason) => lines.push(error_line("pacman -Qu", reason, styles)),
     }
-    match &view.aur {
-        Ok(None) => {}
-        Ok(Some(aur)) => {
-            lines.push(section(
-                &format!("Pending AUR upgrades ({})", safe(&aur.helper)),
-                styles,
-            ));
-            lines.extend(upgrade_rows(&aur.upgrades, styles));
-        }
-        Err(reason) => {
-            lines.push(section("Pending AUR upgrades", styles));
-            lines.push(error_line("AUR helper", reason, styles));
+    for aur in &view.aur {
+        lines.push(section(
+            &format!("Pending AUR upgrades ({})", safe(&aur.helper)),
+            styles,
+        ));
+        match &aur.upgrades {
+            Ok(upgrades) => lines.extend(upgrade_rows(upgrades, styles)),
+            Err(reason) => lines.push(error_line(&aur.helper, reason, styles)),
         }
     }
     lines
@@ -1266,7 +1268,14 @@ fn hints_for(tab: Tab) -> &'static [(&'static str, &'static str)] {
             ("e", "export"),
             ("q", "quit"),
         ],
-        Tab::Pacman | Tab::Connections | Tab::Boot | Tab::Logs | Tab::Gpu => &[
+        Tab::Pacman => &[
+            ("↑↓", "scroll"),
+            ("u", "update"),
+            ("R", "refresh"),
+            ("e", "export"),
+            ("q", "quit"),
+        ],
+        Tab::Connections | Tab::Boot | Tab::Logs | Tab::Gpu => &[
             ("↑↓", "scroll"),
             ("R", "refresh"),
             ("e", "export"),
@@ -1645,7 +1654,8 @@ mod tests {
         assert!(screen(&app).to_lowercase().contains("reading pacman"));
         app.set_pacman(PacmanView {
             upgrades: Ok(Vec::new()),
-            aur: Ok(None),
+            repo_source: RepoSource::LocalDatabase,
+            aur: Vec::new(),
             orphans: Ok(vec!["lld".to_owned(), "opencv".to_owned()]),
             kernel: Ok(KernelView {
                 running: "7.2.11-arch1-1".to_owned(),
@@ -1953,6 +1963,57 @@ mod tests {
     }
 
     #[test]
+    fn the_pacman_tab_names_where_the_list_came_from_and_every_helper() {
+        use crate::model::AurView;
+
+        let mut app = app();
+        for _ in 0..5 {
+            app.tick();
+        }
+        app.handle_key(Key::Char('3'));
+        let mut view = match &app.pacman {
+            PacmanState::Loaded(view) => (**view).clone(),
+            PacmanState::NotRequested | PacmanState::Loading => PacmanView {
+                upgrades: Ok(Vec::new()),
+                repo_source: RepoSource::LocalDatabase,
+                aur: Vec::new(),
+                orphans: Ok(Vec::new()),
+                kernel: Err("n/a".to_owned()),
+                pending_config: Ok(Vec::new()),
+                cache: Err("n/a".to_owned()),
+                stale: Vec::new(),
+                stale_unreadable: 0,
+            },
+        };
+        view.repo_source = RepoSource::LocalDatabase;
+        view.aur = vec![
+            AurView {
+                helper: "yay".to_owned(),
+                upgrades: Ok(Vec::new()),
+            },
+            AurView {
+                helper: "paru".to_owned(),
+                upgrades: Err("no network".to_owned()),
+            },
+        ];
+        app.set_pacman(view.clone());
+        let stale = screen(&app);
+        for expected in [
+            "MAY BE STALE",
+            "PENDING AUR UPGRADES (YAY)",
+            "PENDING AUR UPGRADES (PARU)",
+            "no network",
+            "u update",
+        ] {
+            assert!(stale.contains(expected), "missing {expected:?}\n{stale}");
+        }
+
+        view.repo_source = RepoSource::Checkupdates;
+        app.set_pacman(view);
+        assert!(screen(&app).contains("CHECKUPDATES: FRESH LIST"));
+    }
+
+    #[test]
     fn the_header_says_where_a_replay_is() {
         let mut app = App::new(UiConfig::default());
         assert!(screen(&app).contains("● live"));
@@ -2068,7 +2129,8 @@ mod tests {
             if key == '3' {
                 app.set_pacman(PacmanView {
                     upgrades: Ok(Vec::new()),
-                    aur: Ok(None),
+                    repo_source: RepoSource::LocalDatabase,
+                    aur: Vec::new(),
                     orphans: Ok(vec![evil.to_owned()]),
                     kernel: Ok(KernelView {
                         running: evil.to_owned(),
@@ -2121,7 +2183,8 @@ mod tests {
             .collect();
         app.set_pacman(PacmanView {
             upgrades: Ok(Vec::new()),
-            aur: Ok(None),
+            repo_source: RepoSource::LocalDatabase,
+            aur: Vec::new(),
             orphans: Ok(Vec::new()),
             kernel: Ok(KernelView {
                 running: "7".to_owned(),

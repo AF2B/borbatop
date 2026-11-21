@@ -16,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use borbatop_core::{Json, UnitRow, UtcDateTime};
 use borbatop_tui::{
     AurView, ContainersView, ExportContent, ExportOrder, ExportRequest, KernelView, Model,
-    PacmanView, Report, StaleView,
+    PacmanView, RepoSource, Report, StaleView,
 };
 
 use crate::snapshot::{
@@ -255,13 +255,20 @@ fn upgrades_json(upgrades: &[borbatop_core::Upgrade]) -> Json {
     )
 }
 
-fn aur_json(aur: Option<&AurView>) -> Json {
-    Json::or_null(aur.map(|found| {
-        Json::object([
-            ("helper", Json::text(&found.helper)),
-            ("upgrades", upgrades_json(&found.upgrades)),
-        ])
-    }))
+fn aur_json(aur: &[AurView]) -> Json {
+    Json::Array(
+        aur.iter()
+            .map(|found| {
+                Json::object([
+                    ("helper", Json::text(&found.helper)),
+                    (
+                        "upgrades",
+                        part(&found.upgrades, |list| upgrades_json(list)),
+                    ),
+                ])
+            })
+            .collect(),
+    )
 }
 
 fn kernel_json(kernel: &KernelView) -> Json {
@@ -289,7 +296,14 @@ fn stale_json(stale: &[StaleView]) -> Json {
 fn pacman_json(view: &PacmanView) -> Json {
     Json::object([
         ("upgrades", part(&view.upgrades, |list| upgrades_json(list))),
-        ("aur", part(&view.aur, |aur| aur_json(aur.as_ref()))),
+        (
+            "upgrades_source",
+            Json::text(match view.repo_source {
+                RepoSource::Checkupdates => "checkupdates",
+                RepoSource::LocalDatabase => "local database",
+            }),
+        ),
+        ("aur", aur_json(&view.aur)),
         (
             "orphans",
             part(&view.orphans, |names| {
@@ -491,7 +505,8 @@ mod tests {
     fn a_pacman_part_that_failed_becomes_an_error_object() {
         let view = PacmanView {
             upgrades: Ok(Vec::new()),
-            aur: Ok(None),
+            repo_source: RepoSource::LocalDatabase,
+            aur: Vec::new(),
             orphans: Err("pacman -Qdtq: not found".to_owned()),
             kernel: Ok(KernelView {
                 running: "7.2.1".to_owned(),
@@ -511,7 +526,8 @@ mod tests {
             text.contains(r#""orphans":{"error":"pacman -Qdtq: not found"}"#),
             "{text}"
         );
-        assert!(text.contains(r#""aur":null"#));
+        assert!(text.contains(r#""aur":[]"#));
+        assert!(text.contains(r#""upgrades_source":"local database""#));
         assert!(text.contains(r#""cache_bytes":4096"#));
         assert!(text.contains(r#""stale_unreadable_processes":2"#));
     }

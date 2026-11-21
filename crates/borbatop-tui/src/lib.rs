@@ -19,11 +19,11 @@ pub use app::{App, MessageKind, UiConfig};
 pub use draw::{WORDMARK, draw};
 pub use input::{
     Command, ContainerChoice, ExportContent, ExportOrder, ExportRequest, Key, Seek, ServiceAction,
-    SignalChoice, SortKey, Tab,
+    SignalChoice, SortKey, Tab, UpdatePlan,
 };
 pub use model::{
     AurView, ContainerView, ContainersView, DiskRow, KernelView, Model, MountRow, NetRow,
-    PacmanView, PressureView, ProcessRow, Report, ReportLine, ReportTone, StaleView,
+    PacmanView, PressureView, ProcessRow, RepoSource, Report, ReportLine, ReportTone, StaleView,
 };
 pub use mouse::Mouse;
 pub use terminal::{is_interrupt, key_from_event, mouse_from_event};

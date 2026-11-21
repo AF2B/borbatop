@@ -5,7 +5,8 @@
 
 use borbatop_core::{Nice, ProcessId};
 
-use crate::input::{Command, ContainerChoice, Key, ServiceAction, SignalChoice};
+use crate::input::{Command, ContainerChoice, Key, ServiceAction, SignalChoice, UpdatePlan};
+use crate::model::PacmanView;
 use crate::widgets::fit;
 
 const NICE_FINE_STEP: i8 = 1;
@@ -14,6 +15,8 @@ const CPUS_PER_ROW: usize = 6;
 const TARGET_RESERVED: usize = 12;
 const KEY_ALL_CPUS: char = 'a';
 const KEY_TOGGLE_CPU: char = ' ';
+const PACKAGE_ROWS: usize = 10;
+const PACKAGE_CONTEXT_ROWS: usize = 5;
 
 /// How a line of a dialog should look.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +68,8 @@ pub(crate) enum DialogOutcome {
     Closed,
     /// The dialog was confirmed and asks the program to act.
     Confirmed(Command),
+    /// The dialog hands over to another one (a choice that needs a second question).
+    Switch(Box<Dialog>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +109,40 @@ pub(crate) struct ContainerDialog {
     selected: usize,
 }
 
+/// What one line of the update dialog does when chosen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UpdateChoice {
+    /// Run this update.
+    Run(UpdatePlan),
+    /// Pick packages of one helper first.
+    Choose {
+        helper: String,
+        packages: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UpdateDialog {
+    options: Vec<(String, UpdateChoice)>,
+    selected: usize,
+}
+
+/// A message under the package list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageNotice {
+    None,
+    NothingChosen,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PackagesDialog {
+    helper: String,
+    packages: Vec<String>,
+    chosen: Vec<bool>,
+    cursor: usize,
+    notice: PackageNotice,
+}
+
 /// The open modal dialog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Dialog {
@@ -112,6 +151,8 @@ pub(crate) enum Dialog {
     Affinity(AffinityDialog),
     Service(ServiceDialog),
     Container(ContainerDialog),
+    Update(UpdateDialog),
+    Packages(PackagesDialog),
 }
 
 impl Dialog {
@@ -162,6 +203,58 @@ impl Dialog {
         })
     }
 
+    /// The update picker for what the Pacman report found, or `None` when nothing is pending.
+    ///
+    /// Repositories are offered as one full upgrade only (upgrading a single package leaves Arch
+    /// half-upgraded); AUR helpers offer "update all" and "choose packages".
+    pub(crate) fn update(view: &PacmanView) -> Option<Self> {
+        let mut options = Vec::new();
+        if let Ok(upgrades) = &view.upgrades
+            && !upgrades.is_empty()
+        {
+            options.push((
+                format!(
+                    "official repositories · {} pending · update everything (sudo pacman -Syu)",
+                    upgrades.len()
+                ),
+                UpdateChoice::Run(UpdatePlan::Repositories),
+            ));
+        }
+        for aur in &view.aur {
+            let Ok(upgrades) = &aur.upgrades else {
+                continue;
+            };
+            if upgrades.is_empty() {
+                continue;
+            }
+            options.push((
+                format!(
+                    "AUR · {} · {} pending · update all ({} -Sua)",
+                    aur.helper,
+                    upgrades.len(),
+                    aur.helper
+                ),
+                UpdateChoice::Run(UpdatePlan::AurAll {
+                    helper: aur.helper.clone(),
+                }),
+            ));
+            options.push((
+                format!("AUR · {} · choose packages…", aur.helper),
+                UpdateChoice::Choose {
+                    helper: aur.helper.clone(),
+                    packages: upgrades
+                        .iter()
+                        .map(|upgrade| upgrade.name().to_owned())
+                        .collect(),
+                },
+            ));
+        }
+        (!options.is_empty()).then_some(Self::Update(UpdateDialog {
+            options,
+            selected: 0,
+        }))
+    }
+
     /// Applies a key press.
     pub(crate) fn handle_key(&mut self, key: Key) -> DialogOutcome {
         if key == Key::Escape || key == Key::Char('q') {
@@ -173,6 +266,8 @@ impl Dialog {
             Self::Affinity(dialog) => dialog.handle_key(key),
             Self::Service(dialog) => dialog.handle_key(key),
             Self::Container(dialog) => dialog.handle_key(key),
+            Self::Update(dialog) => dialog.handle_key(key),
+            Self::Packages(dialog) => dialog.handle_key(key),
         }
     }
 
@@ -184,6 +279,8 @@ impl Dialog {
             Self::Affinity(dialog) => dialog.view(width),
             Self::Service(dialog) => dialog.view(width),
             Self::Container(dialog) => dialog.view(width),
+            Self::Update(dialog) => dialog.view(width),
+            Self::Packages(dialog) => dialog.view(width),
         }
     }
 }
@@ -481,6 +578,166 @@ impl ContainerDialog {
         ));
         DialogView {
             title: "CONTAINER",
+            lines,
+        }
+    }
+}
+
+impl UpdateDialog {
+    fn handle_key(&mut self, key: Key) -> DialogOutcome {
+        let last = self.options.len().saturating_sub(1);
+        self.selected = step(self.selected, key, last);
+        if key != Key::Enter {
+            return DialogOutcome::Open;
+        }
+        match self.options.get(self.selected) {
+            Some((_, UpdateChoice::Run(plan))) => {
+                DialogOutcome::Confirmed(Command::RunUpdate(plan.clone()))
+            }
+            Some((_, UpdateChoice::Choose { helper, packages })) => {
+                DialogOutcome::Switch(Box::new(Dialog::Packages(PackagesDialog {
+                    helper: helper.clone(),
+                    packages: packages.clone(),
+                    chosen: vec![false; packages.len()],
+                    cursor: 0,
+                    notice: PackageNotice::None,
+                })))
+            }
+            None => DialogOutcome::Closed,
+        }
+    }
+
+    fn view(&self, width: usize) -> DialogView {
+        let mut lines = vec![
+            DialogLine::plain(
+                "The update runs on the real terminal: you will be asked for your password.",
+                Tone::Secondary,
+            ),
+            DialogLine::blank(),
+        ];
+        for (position, (label, _)) in self.options.iter().enumerate() {
+            let tone = if position == self.selected {
+                Tone::Selected
+            } else {
+                Tone::Plain
+            };
+            lines.push(DialogLine::plain(
+                format!(" {} ", fit(label, width.saturating_sub(2))),
+                tone,
+            ));
+        }
+        lines.push(DialogLine::blank());
+        lines.push(DialogLine::plain(
+            "↑↓ choose · Enter continue · Esc cancel",
+            Tone::Secondary,
+        ));
+        DialogView {
+            title: "UPDATE",
+            lines,
+        }
+    }
+}
+
+impl PackagesDialog {
+    fn handle_key(&mut self, key: Key) -> DialogOutcome {
+        let last = self.packages.len().saturating_sub(1);
+        self.cursor = step(self.cursor, key, last);
+        match key {
+            Key::Char(KEY_TOGGLE_CPU) => {
+                if let Some(slot) = self.chosen.get_mut(self.cursor) {
+                    *slot = !*slot;
+                }
+                self.notice = PackageNotice::None;
+            }
+            Key::Char(KEY_ALL_CPUS) => {
+                self.chosen.fill(true);
+                self.notice = PackageNotice::None;
+            }
+            Key::Enter => {
+                let packages: Vec<String> = self
+                    .packages
+                    .iter()
+                    .zip(&self.chosen)
+                    .filter(|(_, chosen)| **chosen)
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                if packages.is_empty() {
+                    self.notice = PackageNotice::NothingChosen;
+                    return DialogOutcome::Open;
+                }
+                return DialogOutcome::Confirmed(Command::RunUpdate(UpdatePlan::AurPackages {
+                    helper: self.helper.clone(),
+                    packages,
+                }));
+            }
+            Key::Char(_)
+            | Key::Up
+            | Key::Down
+            | Key::PageUp
+            | Key::PageDown
+            | Key::Left
+            | Key::Right
+            | Key::Home
+            | Key::End
+            | Key::Escape
+            | Key::Backspace
+            | Key::Tab
+            | Key::BackTab => {}
+        }
+        DialogOutcome::Open
+    }
+
+    fn view(&self, width: usize) -> DialogView {
+        let first = self
+            .cursor
+            .saturating_sub(PACKAGE_CONTEXT_ROWS)
+            .min(self.packages.len().saturating_sub(PACKAGE_ROWS));
+        let mut lines = vec![
+            DialogLine::plain(
+                format!(
+                    "AUR · {} · {} chosen",
+                    self.helper,
+                    self.chosen.iter().filter(|c| **c).count()
+                ),
+                Tone::Secondary,
+            ),
+            DialogLine::blank(),
+        ];
+        for (position, name) in self
+            .packages
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(PACKAGE_ROWS)
+        {
+            let mark = if self.chosen.get(position) == Some(&true) {
+                'x'
+            } else {
+                ' '
+            };
+            let tone = if position == self.cursor {
+                Tone::Selected
+            } else {
+                Tone::Plain
+            };
+            lines.push(DialogLine::plain(
+                format!(" [{mark}] {} ", fit(name, width.saturating_sub(8))),
+                tone,
+            ));
+        }
+        lines.push(DialogLine::blank());
+        if self.notice == PackageNotice::NothingChosen {
+            lines.push(DialogLine::plain(
+                "choose at least one package",
+                Tone::Danger,
+            ));
+        }
+        lines.push(DialogLine::plain(
+            "↑↓ move · Space toggle · a all · Enter update · Esc cancel",
+            Tone::Secondary,
+        ));
+        DialogView {
+            title: "AUR PACKAGES",
             lines,
         }
     }

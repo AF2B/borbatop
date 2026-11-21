@@ -1,21 +1,22 @@
 //! The interactive loop: terminal setup, events, commands, and teardown.
 
-use std::io;
+use std::io::{self, BufRead};
+use std::process::Command as Program;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant, SystemTime};
 
 use borbatop_core::{Nice, Pid, ProcessId};
-use borbatop_sources::{ScheduleError, send_signal, set_affinity, set_nice};
+use borbatop_sources::{ScheduleError, send_signal, set_affinity, set_nice, update_command};
 use borbatop_tui::{
-    App, Command, ExportRequest, MessageKind, Model, Seek, SignalChoice, UiConfig, draw,
-    is_interrupt, key_from_event, mouse_from_event,
+    App, Command, ExportRequest, Key, MessageKind, Model, Seek, SignalChoice, UiConfig, UpdatePlan,
+    draw, is_interrupt, key_from_event, mouse_from_event,
 };
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use ratatui::crossterm::execute;
 
 use crate::config::Settings;
-use crate::convert::{container_action_of, signal_of, unit_action_of};
+use crate::convert::{container_action_of, signal_of, unit_action_of, update_request_of};
 use crate::export::write_export;
 use crate::reports::ProcessUsage;
 use crate::worker::{
@@ -79,7 +80,7 @@ fn session(
 ) -> io::Result<()> {
     let mut terminal = ratatui::try_init()?;
     let result = capture_mouse(settings.mouse)
-        .and_then(|()| event_loop(&mut terminal, app, events, received, replay));
+        .and_then(|()| event_loop(&mut terminal, app, events, received, replay, settings.mouse));
     // Best effort: the terminal is being restored, and there is nobody left to tell.
     let _released = capture_mouse_release(settings.mouse);
     ratatui::restore();
@@ -152,6 +153,7 @@ fn event_loop(
     events: &Sender<WorkerEvent>,
     received: &Receiver<WorkerEvent>,
     mut replay: Option<Replay>,
+    mouse: bool,
 ) -> io::Result<()> {
     loop {
         terminal.draw(|frame| draw(frame, &app))?;
@@ -171,10 +173,22 @@ fn event_loop(
                     None
                 }
             };
-            if let Some(command) = command
-                && !dispatch(command, &mut app, events, replay.as_mut())
-            {
-                return Ok(());
+            match command {
+                Some(Command::RunUpdate(_)) if replay.is_some() => {
+                    app.notify(
+                        "this is a recording: nothing here can be acted on",
+                        MessageKind::Error,
+                    );
+                }
+                Some(Command::RunUpdate(plan)) => {
+                    update_on_terminal(terminal, &mut app, (events, received), &plan, mouse)?;
+                }
+                Some(command) => {
+                    if !dispatch(command, &mut app, events, replay.as_mut()) {
+                        return Ok(());
+                    }
+                }
+                None => {}
             }
         }
 
@@ -231,6 +245,7 @@ fn dispatch(
         | Command::SetAffinity { .. }
         | Command::ControlUnit { .. }
         | Command::ControlContainer { .. }
+        | Command::RunUpdate(_)
         | Command::LoadDetail { .. } => app.notify(
             "this is a recording: nothing here can be acted on",
             MessageKind::Error,
@@ -243,8 +258,9 @@ fn dispatch(
 fn execute(command: Command, app: &mut App, events: &Sender<WorkerEvent>) -> bool {
     match command {
         Command::Quit => return false,
-        // Only a recording has samples to step through.
-        Command::Seek(_) => {}
+        // Only a recording has samples to step through, and the event loop, which owns the
+        // terminal, handles updates before a command reaches this point.
+        Command::Seek(_) | Command::RunUpdate(_) => {}
         Command::SendSignal { id, signal } => deliver(app, id, signal),
         Command::SetNice { id, nice } => renice(app, id, nice),
         Command::SetAffinity { id, cpus } => pin(app, id, &cpus),
@@ -295,6 +311,60 @@ fn execute(command: Command, app: &mut App, events: &Sender<WorkerEvent>) -> boo
         }
     }
     true
+}
+
+/// Runs an update on the real terminal: the screen steps aside, the command talks to the person
+/// directly (password, confirmation), and the screen comes back and refreshes the report.
+fn update_on_terminal(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    (events, received): (&Sender<WorkerEvent>, &Receiver<WorkerEvent>),
+    plan: &UpdatePlan,
+    mouse: bool,
+) -> io::Result<()> {
+    let command = match update_command(&update_request_of(plan)) {
+        Ok(command) => command,
+        Err(error) => {
+            app.notify(format!("update refused: {error}"), MessageKind::Error);
+            return Ok(());
+        }
+    };
+
+    capture_mouse_release(mouse)?;
+    ratatui::restore();
+    println!("\nborbatop: running `{command}`\n");
+    let status = Program::new(command.program())
+        .args(command.arguments())
+        .status();
+    println!("\nborbatop: press Enter to return to the screen.");
+    // Any answer, or none at all (input closed), brings the screen back.
+    let _answer = io::stdin().lock().lines().next();
+
+    *terminal = ratatui::try_init()?;
+    capture_mouse(mouse)?;
+
+    // The sampler kept running meanwhile: catch up first, or the samples queued during a long
+    // update would make the result message fade the moment it appears.
+    while let Ok(update) = received.try_recv() {
+        apply(update, app);
+    }
+    match status {
+        Ok(status) if status.success() => {
+            app.notify(format!("`{command}` finished"), MessageKind::Info);
+        }
+        Ok(status) => app.notify(
+            format!("`{command}` ended with {status}"),
+            MessageKind::Error,
+        ),
+        Err(error) => app.notify(
+            format!("cannot run {}: {error}", command.program()),
+            MessageKind::Error,
+        ),
+    }
+    if let Some(refresh) = app.handle_key(Key::Char('R')) {
+        execute(refresh, app, events);
+    }
+    Ok(())
 }
 
 /// Writes the tab being shown to a JSON file in the current directory and says where it went.

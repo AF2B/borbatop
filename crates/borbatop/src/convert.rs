@@ -1,8 +1,12 @@
 //! Translation between the data sources' types and the screen's types.
 
-use borbatop_sources::{ContainerAction, KernelStatus, PacmanReport, Reading, Signal, UnitAction};
+use borbatop_sources::{
+    ContainerAction, KernelStatus, PacmanReport, Reading, Signal, UnitAction, UpdateRequest,
+    UpgradeSource,
+};
 use borbatop_tui::{
-    AurView, ContainerChoice, KernelView, PacmanView, ServiceAction, SignalChoice, StaleView,
+    AurView, ContainerChoice, KernelView, PacmanView, RepoSource, ServiceAction, SignalChoice,
+    StaleView, UpdatePlan,
 };
 
 /// The screen's view of a Pacman report; every failed part keeps its own message.
@@ -14,12 +18,18 @@ use borbatop_tui::{
 pub fn pacman_view(report: &PacmanReport) -> PacmanView {
     PacmanView {
         upgrades: converted(report.upgrades(), Clone::clone),
-        aur: converted(report.aur(), |aur| {
-            aur.as_ref().map(|found| AurView {
+        repo_source: match report.upgrade_source() {
+            UpgradeSource::Checkupdates => RepoSource::Checkupdates,
+            UpgradeSource::LocalDatabase => RepoSource::LocalDatabase,
+        },
+        aur: report
+            .aur()
+            .iter()
+            .map(|found| AurView {
                 helper: found.helper().to_owned(),
-                upgrades: found.upgrades().to_vec(),
+                upgrades: converted(found.upgrades(), Clone::clone),
             })
-        }),
+            .collect(),
         orphans: converted(report.orphans(), Clone::clone),
         kernel: converted(report.kernel(), kernel_view),
         pending_config: converted(report.pending_config(), |config| {
@@ -93,6 +103,25 @@ pub const fn unit_action_of(action: ServiceAction) -> UnitAction {
     }
 }
 
+/// The data sources' update request for what was chosen in the update dialog.
+///
+/// # Arguments
+///
+/// * `plan` - what the person chose to update
+#[must_use]
+pub fn update_request_of(plan: &UpdatePlan) -> UpdateRequest {
+    match plan {
+        UpdatePlan::Repositories => UpdateRequest::Repositories,
+        UpdatePlan::AurAll { helper } => UpdateRequest::AurAll {
+            helper: helper.clone(),
+        },
+        UpdatePlan::AurPackages { helper, packages } => UpdateRequest::AurPackages {
+            helper: helper.clone(),
+            packages: packages.clone(),
+        },
+    }
+}
+
 /// The data sources' container action for a choice made in the container dialog.
 ///
 /// # Arguments
@@ -111,6 +140,24 @@ pub const fn container_action_of(choice: ContainerChoice) -> ContainerAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_update_plan_maps_to_the_matching_request() {
+        assert_eq!(
+            update_request_of(&UpdatePlan::Repositories),
+            UpdateRequest::Repositories
+        );
+        assert_eq!(
+            update_request_of(&UpdatePlan::AurPackages {
+                helper: "yay".to_owned(),
+                packages: vec!["a".to_owned()],
+            }),
+            UpdateRequest::AurPackages {
+                helper: "yay".to_owned(),
+                packages: vec!["a".to_owned()],
+            }
+        );
+    }
 
     #[test]
     fn every_container_choice_maps_to_the_matching_verb() {
@@ -141,7 +188,7 @@ mod tests {
         let view = pacman_view(&report);
         assert_eq!(view.kernel.is_ok(), report.kernel().is_ok());
         assert_eq!(view.upgrades.is_ok(), report.upgrades().is_ok());
-        assert_eq!(view.aur.is_ok(), report.aur().is_ok());
+        assert_eq!(view.aur.len(), report.aur().len());
         assert_eq!(view.cache.is_ok(), report.cache_size().is_ok());
     }
 }
