@@ -100,4 +100,4 @@ Regra de dependência: `borbatop → {sources, tui} → core`, nunca o inverso; 
 - Sem crate nova para JSON: `core::json` escreve e lê só o que o programa produz (inteiros, decimais com até duas casas, strings, arrays, objetos). O que não for isso é recusado, não arredondado.
 - Renice e afinidade valem por thread no Linux: as funções percorrem `/proc/[pid]/task`. Não existe forma com pidfd; a hora de início é conferida logo antes (risco residual de milissegundos, com efeito só em prioridade ou máscara).
 - Processos com capabilities de arquivo (ex.: `kwin_wayland`) escondem `/proc/[pid]/exe` e ficam com pacote `—`; não foi adotado fallback por `argv[0]` porque o próprio processo controla esse texto.
-- `<a confirmar>`: URL do repositório, publicação no AUR e primeira execução real do workflow de CI (nenhum dos dois ocorreu).
+- `<a confirmar>`: publicação no AUR e o resultado da primeira execução do workflow de CI (repositório: github.com/AF2B/borbatop).

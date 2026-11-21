@@ -28,7 +28,7 @@ From source (Rust stable):
 cargo install --path crates/borbatop
 ```
 
-Arch packaging drafts live in `packaging/arch` (release) and `packaging/arch/borbatop-git` (development version). Both were built and inspected locally with `makepkg`, but `url` is still a placeholder: set it to the real repository before publishing anywhere.
+Arch packaging drafts live in `packaging/arch` (release) and `packaging/arch/borbatop-git` (development version). Both were built and inspected locally with `makepkg`; they are not published to the AUR yet.
 
 ## Use
 
