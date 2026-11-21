@@ -314,6 +314,25 @@ impl ContainerChoice {
     }
 }
 
+/// What the person chose to update in the Pacman tab.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdatePlan {
+    /// A full system upgrade of the repositories.
+    Repositories,
+    /// Every pending AUR upgrade of one helper.
+    AurAll {
+        /// Helper to run, for example `yay`.
+        helper: String,
+    },
+    /// Chosen AUR packages of one helper.
+    AurPackages {
+        /// Helper to run, for example `yay`.
+        helper: String,
+        /// Packages to upgrade; never empty.
+        packages: Vec<String>,
+    },
+}
+
 /// How the process table was ordered when it was exported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExportOrder {
@@ -392,6 +411,8 @@ pub enum Command {
     },
     /// Write the tab being shown to a JSON file.
     Export(Box<ExportRequest>),
+    /// Run an update on the real terminal, where passwords and confirmations can be answered.
+    RunUpdate(UpdatePlan),
     /// Show everything known about one process.
     LoadDetail {
         /// Process to inspect: PID plus start time.

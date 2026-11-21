@@ -18,6 +18,7 @@ mod signal;
 mod statics;
 mod system;
 mod units;
+mod updater;
 
 pub use connections::{Connection, ConnectionReport, SocketOwner, collect_connections};
 pub use containers::{
@@ -29,7 +30,7 @@ pub use error::{CommandError, ParseCause, Reading, SourceError};
 pub use gpu::{GpuReport, collect_gpus};
 pub use owners::{FileOwners, PACMAN_LOCAL_DB};
 pub use pacman::{
-    AurUpgrades, KernelStatus, PacmanReport, PendingConfig, StaleProcess, StaleScan,
+    AurUpgrades, KernelStatus, PacmanReport, PendingConfig, StaleProcess, StaleScan, UpgradeSource,
     collect_pacman_report,
 };
 pub use proc::{ProcCollector, ProcessFailure, ProcessFailureCause, ProcessRecord, Snapshot};
@@ -38,3 +39,4 @@ pub use signal::{Signal, SignalError, send_signal};
 pub use statics::{NOT_AVAILABLE, ProcessStatics};
 pub use system::{MountReport, MountUsage, SystemCollector, SystemSnapshot};
 pub use units::{UnitAction, control_unit, list_units, unit_logs};
+pub use updater::{UpdateCommand, UpdateError, UpdateRequest, update_command};

@@ -704,6 +704,7 @@ impl App {
             'R' => self.request_reload(),
             'l' => self.request_logs(),
             'e' => self.request_export(),
+            'u' => self.open_update_dialog(),
             digit => {
                 let position = digit
                     .to_digit(10)
@@ -906,6 +907,25 @@ impl App {
         None
     }
 
+    /// Opens the update picker for what the Pacman report found.
+    fn open_update_dialog(&mut self) -> Option<Command> {
+        if self.tab != Tab::Pacman {
+            return None;
+        }
+        let PacmanState::Loaded(view) = &self.pacman else {
+            self.notify(
+                "wait for the Pacman report to finish loading",
+                MessageKind::Error,
+            );
+            return None;
+        };
+        match Dialog::update(view) {
+            Some(dialog) => self.dialog = Some(dialog),
+            None => self.notify("nothing to update", MessageKind::Info),
+        }
+        None
+    }
+
     fn open_service_dialog(&mut self) -> Option<Command> {
         if self.tab == Tab::Containers {
             let container = self.selected_container_view()?;
@@ -935,6 +955,10 @@ impl App {
             DialogOutcome::Confirmed(command) => {
                 self.dialog = None;
                 Some(command)
+            }
+            DialogOutcome::Switch(next) => {
+                self.dialog = Some(*next);
+                None
             }
         }
     }
@@ -1255,6 +1279,7 @@ mod tests {
                 | Command::LoadDetail { .. }
                 | Command::LoadReport(_)
                 | Command::LoadContainers
+                | Command::RunUpdate(_)
                 | Command::ControlContainer { .. }
                 | Command::LoadContainerLogs { .. }
                 | Command::RefreshPacman
@@ -1486,6 +1511,123 @@ mod tests {
         assert!(
             matches!(request.content, ExportContent::Containers(ref view) if view.containers.len() == 2)
         );
+    }
+
+    fn upgrades(text: &str) -> Vec<borbatop_core::Upgrade> {
+        borbatop_core::parse_upgrades(text).unwrap()
+    }
+
+    fn pacman_view(
+        repo: Vec<borbatop_core::Upgrade>,
+        aur: Vec<crate::model::AurView>,
+    ) -> PacmanView {
+        PacmanView {
+            upgrades: Ok(repo),
+            repo_source: crate::model::RepoSource::Checkupdates,
+            aur,
+            orphans: Ok(Vec::new()),
+            kernel: Err("n/a".to_owned()),
+            pending_config: Ok(Vec::new()),
+            cache: Err("n/a".to_owned()),
+            stale: Vec::new(),
+            stale_unreadable: 0,
+        }
+    }
+
+    fn app_on_pacman(view: PacmanView) -> App {
+        let mut app = app_with(vec![]);
+        assert_eq!(app.handle_key(Key::Char('3')), Some(Command::RefreshPacman));
+        app.set_pacman(view);
+        app
+    }
+
+    #[test]
+    fn updating_waits_for_the_report_and_says_when_there_is_nothing_to_do() {
+        let mut app = app_with(vec![]);
+        app.handle_key(Key::Char('3'));
+        assert_eq!(app.handle_key(Key::Char('u')), None);
+        assert!(app.dialog.is_none());
+        assert!(app.message.as_ref().unwrap().text.contains("wait"));
+
+        app.set_pacman(pacman_view(Vec::new(), Vec::new()));
+        app.message = None;
+        app.handle_key(Key::Char('u'));
+        assert!(app.dialog.is_none());
+        assert_eq!(app.message.as_ref().unwrap().text, "nothing to update");
+
+        app.handle_key(Key::Char('1'));
+        app.handle_key(Key::Char('u'));
+        assert!(app.dialog.is_none(), "only the Pacman tab updates");
+    }
+
+    #[test]
+    fn repositories_update_as_a_whole_and_helpers_offer_all_or_a_choice() {
+        let view = pacman_view(
+            upgrades("linux 1 -> 2\nglibc 1 -> 2\n"),
+            vec![
+                crate::model::AurView {
+                    helper: "yay".to_owned(),
+                    upgrades: Ok(upgrades("tool-a 1 -> 2\ntool-b 3 -> 4\n")),
+                },
+                crate::model::AurView {
+                    helper: "paru".to_owned(),
+                    upgrades: Err("no network".to_owned()),
+                },
+            ],
+        );
+        let mut app = app_on_pacman(view.clone());
+        app.handle_key(Key::Char('u'));
+        assert!(app.dialog.is_some());
+        assert_eq!(
+            app.handle_key(Key::Enter),
+            Some(Command::RunUpdate(crate::input::UpdatePlan::Repositories))
+        );
+
+        let mut app = app_on_pacman(view);
+        app.handle_key(Key::Char('u'));
+        app.handle_key(Key::Down);
+        assert_eq!(
+            app.handle_key(Key::Enter),
+            Some(Command::RunUpdate(crate::input::UpdatePlan::AurAll {
+                helper: "yay".to_owned()
+            }))
+        );
+    }
+
+    #[test]
+    fn choosing_aur_packages_needs_at_least_one_and_returns_exactly_the_chosen() {
+        let view = pacman_view(
+            Vec::new(),
+            vec![crate::model::AurView {
+                helper: "yay".to_owned(),
+                upgrades: Ok(upgrades("tool-a 1 -> 2\ntool-b 3 -> 4\ntool-c 5 -> 6\n")),
+            }],
+        );
+        let mut app = app_on_pacman(view);
+        app.handle_key(Key::Char('u'));
+        app.handle_key(Key::Down); // "choose packages…"
+        assert_eq!(app.handle_key(Key::Enter), None, "opens the picker");
+        assert!(app.dialog.is_some());
+
+        assert_eq!(
+            app.handle_key(Key::Enter),
+            None,
+            "nothing chosen yet: stays open"
+        );
+        assert!(app.dialog.is_some());
+
+        app.handle_key(Key::Char(' ')); // tool-a
+        app.handle_key(Key::Down);
+        app.handle_key(Key::Down);
+        app.handle_key(Key::Char(' ')); // tool-c
+        assert_eq!(
+            app.handle_key(Key::Enter),
+            Some(Command::RunUpdate(crate::input::UpdatePlan::AurPackages {
+                helper: "yay".to_owned(),
+                packages: vec!["tool-a".to_owned(), "tool-c".to_owned()],
+            }))
+        );
+        assert!(app.dialog.is_none());
     }
 
     #[test]

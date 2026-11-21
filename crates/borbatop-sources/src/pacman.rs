@@ -19,6 +19,8 @@ const PACKAGE_CACHE: &str = "/var/cache/pacman/pkg";
 const MAPS_FILE: &str = "maps";
 /// `pacman -Qu` and `-Qdtq` exit with 1 when the list is empty.
 const EMPTY_LIST_EXIT_CODE: i32 = 1;
+/// `checkupdates` exits with 2 when there is nothing to upgrade.
+const CHECKUPDATES_NONE_EXIT_CODE: i32 = 2;
 const MAX_CONFIG_DEPTH: usize = 8;
 /// AUR helpers that answer `-Qua` with the AUR packages that have a newer version.
 const AUR_HELPERS: [&str; 2] = ["yay", "paru"];
@@ -108,11 +110,11 @@ impl StaleScan {
     }
 }
 
-/// Upgrades of packages built from the AUR, as an AUR helper reports them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Upgrades of packages built from the AUR, as one installed AUR helper reports them.
+#[derive(Debug)]
 pub struct AurUpgrades {
     helper: &'static str,
-    upgrades: Vec<Upgrade>,
+    upgrades: Reading<Vec<Upgrade>>,
 }
 
 impl AurUpgrades {
@@ -122,18 +124,29 @@ impl AurUpgrades {
         self.helper
     }
 
-    /// AUR packages with a newer version.
+    /// AUR packages with a newer version, or why the helper could not tell (no network).
     #[must_use]
-    pub fn upgrades(&self) -> &[Upgrade] {
+    pub const fn upgrades(&self) -> &Reading<Vec<Upgrade>> {
         &self.upgrades
     }
+}
+
+/// Where the list of pending repository upgrades came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpgradeSource {
+    /// `checkupdates` (pacman-contrib): reads a temporary copy of the database, so the list is
+    /// fresh and the system is never left half-synchronized.
+    Checkupdates,
+    /// `pacman -Qu`: only what the last synchronization of the local database knows.
+    LocalDatabase,
 }
 
 /// Everything the Pacman tab shows, each part with its own success or failure.
 #[derive(Debug)]
 pub struct PacmanReport {
     upgrades: Reading<Vec<Upgrade>>,
-    aur: Reading<Option<AurUpgrades>>,
+    upgrade_source: UpgradeSource,
+    aur: Vec<AurUpgrades>,
     orphans: Reading<Vec<String>>,
     kernel: Reading<KernelStatus>,
     pending_config: Reading<PendingConfig>,
@@ -148,9 +161,16 @@ impl PacmanReport {
         &self.upgrades
     }
 
-    /// AUR upgrades; `None` when no AUR helper is installed. Needs network access.
+    /// How the repository upgrades were found.
     #[must_use]
-    pub const fn aur(&self) -> &Reading<Option<AurUpgrades>> {
+    pub const fn upgrade_source(&self) -> UpgradeSource {
+        self.upgrade_source
+    }
+
+    /// AUR upgrades, one entry per installed AUR helper (none when there is no helper). Needs
+    /// network access.
+    #[must_use]
+    pub fn aur(&self) -> &[AurUpgrades] {
         &self.aur
     }
 
@@ -192,8 +212,10 @@ impl PacmanReport {
 /// * `processes` - `(pid, command name)` of the running processes to inspect for stale libraries
 #[must_use]
 pub fn collect_pacman_report(processes: &[(Pid, String)]) -> PacmanReport {
+    let upgrades = read_upgrades();
     PacmanReport {
-        upgrades: read_upgrades(),
+        upgrades: upgrades.0,
+        upgrade_source: upgrades.1,
         aur: read_aur(),
         orphans: read_orphans(),
         kernel: kernel_status(Path::new(OSRELEASE), Path::new(KERNEL_MODULES)),
@@ -203,26 +225,46 @@ pub fn collect_pacman_report(processes: &[(Pid, String)]) -> PacmanReport {
     }
 }
 
-fn read_upgrades() -> Reading<Vec<Upgrade>> {
+/// Pending repository upgrades: `checkupdates` when installed, otherwise the local database.
+fn read_upgrades() -> (Reading<Vec<Upgrade>>, UpgradeSource) {
+    match run("checkupdates", &[], &[CHECKUPDATES_NONE_EXIT_CODE]) {
+        Ok(output) => (
+            parse_upgrades(&output).map_err(|error| SourceError::parse("checkupdates", error)),
+            UpgradeSource::Checkupdates,
+        ),
+        // Not installed, or it failed (no network): the local database still answers.
+        Err(_) => (read_local_upgrades(), UpgradeSource::LocalDatabase),
+    }
+}
+
+fn read_local_upgrades() -> Reading<Vec<Upgrade>> {
     let output = run("pacman", &["-Qu"], &[EMPTY_LIST_EXIT_CODE]).map_err(SourceError::Command)?;
     parse_upgrades(&output).map_err(|error| SourceError::parse("pacman -Qu", error))
 }
 
-/// Asks the first installed AUR helper for upgrades; no helper is not a failure.
-fn read_aur() -> Reading<Option<AurUpgrades>> {
-    for helper in AUR_HELPERS {
-        match run(helper, &["-Qua"], &[EMPTY_LIST_EXIT_CODE]) {
-            Ok(output) => {
-                let upgrades = parse_upgrades(&output)
-                    .map_err(|error| SourceError::parse("AUR helper -Qua", error))?;
-                return Ok(Some(AurUpgrades { helper, upgrades }));
-            }
-            Err(CommandError::Spawn { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
-            }
-            Err(error) => return Err(SourceError::Command(error)),
-        }
-    }
-    Ok(None)
+/// Asks every installed AUR helper for upgrades; a helper that is not installed is left out.
+fn read_aur() -> Vec<AurUpgrades> {
+    AUR_HELPERS
+        .iter()
+        .filter_map(
+            |&helper| match run(helper, &["-Qua"], &[EMPTY_LIST_EXIT_CODE]) {
+                Ok(output) => Some(AurUpgrades {
+                    helper,
+                    upgrades: parse_upgrades(&output)
+                        .map_err(|error| SourceError::parse("AUR helper -Qua", error)),
+                }),
+                Err(CommandError::Spawn { source, .. })
+                    if source.kind() == io::ErrorKind::NotFound =>
+                {
+                    None
+                }
+                Err(error) => Some(AurUpgrades {
+                    helper,
+                    upgrades: Err(SourceError::Command(error)),
+                }),
+            },
+        )
+        .collect()
 }
 
 fn read_orphans() -> Reading<Vec<String>> {
@@ -432,6 +474,12 @@ mod tests {
     #[test]
     fn real_report_reads_pacman_without_panicking() {
         let report = collect_pacman_report(&[]);
+        assert!(
+            report
+                .aur()
+                .iter()
+                .all(|helper| AUR_HELPERS.contains(&helper.helper()))
+        );
         // Kernel and upgrades depend on the host (containers have no modules or sync database).
         assert!(report.cache_size().is_ok());
         assert_eq!(report.stale().unreadable(), 0);

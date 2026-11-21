@@ -133,8 +133,17 @@ pub struct StaleView {
 pub struct AurView {
     /// Helper that answered, for example `yay`.
     pub helper: String,
-    /// AUR packages with a newer version.
-    pub upgrades: Vec<Upgrade>,
+    /// AUR packages with a newer version, or why the helper could not tell.
+    pub upgrades: Result<Vec<Upgrade>, String>,
+}
+
+/// How the list of pending repository upgrades was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoSource {
+    /// `checkupdates`: a temporary copy of the database, so the list is fresh.
+    Checkupdates,
+    /// `pacman -Qu`: only what the last synchronization of the local database knows.
+    LocalDatabase,
 }
 
 /// Everything the Pacman tab shows; each part may have failed on its own.
@@ -142,8 +151,10 @@ pub struct AurView {
 pub struct PacmanView {
     /// Pending upgrades, or why they are unknown.
     pub upgrades: Result<Vec<Upgrade>, String>,
-    /// AUR upgrades, nothing when no AUR helper is installed, or why they are unknown.
-    pub aur: Result<Option<AurView>, String>,
+    /// How the repository upgrades were found.
+    pub repo_source: RepoSource,
+    /// AUR upgrades, one entry per installed AUR helper (none when there is no helper).
+    pub aur: Vec<AurView>,
     /// Orphaned packages, or why they are unknown.
     pub orphans: Result<Vec<String>, String>,
     /// Kernel status, or why it is unknown.
