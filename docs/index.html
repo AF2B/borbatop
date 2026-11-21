@@ -295,15 +295,18 @@ footer i { color: var(--status-ok); font-style: normal; }
       <div class="key"><kbd>↑ ↓ j k</kbd><span>navegar</span></div>
       <div class="key"><kbd>1 – 9</kbd><span>trocar de aba (Tab / Shift+Tab também)</span></div>
       <div class="key"><kbd>Enter</kbd><span>detalhe do processo: arquivos, sockets, limites</span></div>
-      <div class="key"><kbd>s</kbd><span>alternar coluna de ordenação</span></div>
+      <div class="key"><kbd>s</kbd><span>alternar coluna de ordenação (o cursor volta ao topo)</span></div>
       <div class="key"><kbd>r</kbd><span>inverter ordem</span></div>
       <div class="key"><kbd>/</kbd><span>filtrar por comando, usuário, unit ou pacote</span></div>
       <div class="key"><kbd>Esc</kbd><span>limpar filtro / fechar diálogo</span></div>
       <div class="key"><kbd>K</kbd><span>enviar sinal (SIGTERM, SIGKILL, SIGHUP)</span></div>
       <div class="key"><kbd>n</kbd><span>renice (-20 a 19) do processo selecionado</span></div>
       <div class="key"><kbd>c</kbd><span>escolher em quais CPUs o processo pode rodar</span></div>
-      <div class="key"><kbd>a</kbd><span>reiniciar, parar ou iniciar o serviço selecionado</span></div>
+      <div class="key"><kbd>a</kbd><span>ação no serviço ou no container selecionado (iniciar, parar, reiniciar, remover)</span></div>
       <div class="key"><kbd>R</kbd><span>refazer o relatório da aba atual</span></div>
+      <div class="key"><kbd>e</kbd><span>exportar a aba atual para JSON, com o filtro e a ordem que você vê</span></div>
+      <div class="key"><kbd>u</kbd><span>aba Pacman: escolher o que atualizar (repositórios, yay, paru)</span></div>
+      <div class="key"><kbd>l</kbd><span>logs da unidade (Serviços) ou do container (Containers)</span></div>
       <div class="key"><kbd>← →</kbd><span>amostra anterior / seguinte em um replay</span></div>
       <div class="key"><kbd>mouse</kbd><span>clique em aba, título de coluna ou linha; roda move a seleção</span></div>
       <div class="key"><kbd>p</kbd><span>mostrar/ocultar dono do pacote (pacman)</span></div>
@@ -317,7 +320,8 @@ footer i { color: var(--status-ok); font-style: normal; }
 $ borbatop snapshot --with-commands     <span style="color:var(--grey)"># inclui linhas de comando</span>
 $ borbatop record trace.jsonl -n 120    <span style="color:var(--grey)"># 120 amostras, 1 por intervalo</span>
 $ borbatop replay trace.jsonl           <span style="color:var(--grey)"># a mesma tela, sobre a gravação</span>
-$ borbatop --no-mouse                   <span style="color:var(--grey)"># deixa o mouse para o terminal</span></pre>
+$ borbatop --no-mouse                   <span style="color:var(--grey)"># deixa o mouse para o terminal</span>
+<span style="color:var(--grey)"># dentro da tela: e salva a aba como borbatop-&lt;aba&gt;-&lt;data&gt;.json</span></pre>
       </div>
       <div>
         <p class="sub">Privacidade</p>
@@ -326,6 +330,8 @@ $ borbatop --no-mouse                   <span style="color:var(--grey)"># deixa 
           <li>Gravação é criada com permissão 0600 e nunca sobrescreve um arquivo existente.</li>
           <li>Texto vindo de outros processos, do journal e do disco é limpo de caracteres de controle antes de aparecer.</li>
           <li>No replay, ações que mudam a máquina são recusadas.</li>
+          <li>O arquivo exportado (<code>e</code>) também nasce 0600, sem linhas de comando e sem sobrescrever outro.</li>
+          <li>Atualizações rodam no terminal de verdade: a senha do <code>sudo</code> nunca passa pelo borbatop.</li>
         </ul>
       </div>
     </div>
@@ -358,7 +364,7 @@ $ borbatop --no-mouse                   <span style="color:var(--grey)"># deixa 
       <div class="card">
         <div class="label">pacman · libalpm</div>
         <h3>Quem é dono deste binário?</h3>
-        <p>Coluna PKG: o equivalente a <code>pacman -Qo</code> para cada executável em execução. Aba Pacman: updates pendentes (e do AUR, quando <code>yay</code> ou <code>paru</code> está instalado), órfãos (<code>-Qdtq</code>), <code>.pacnew</code>/<code>.pacsave</code> esquecidos.</p>
+        <p>Coluna PKG: o equivalente a <code>pacman -Qo</code> para cada executável em execução. Aba Pacman: updates pendentes (via <code>checkupdates</code> quando existe, e do AUR para cada <code>yay</code> ou <code>paru</code> instalado), com <code>u</code> para atualizar; órfãos (<code>-Qdtq</code>), <code>.pacnew</code>/<code>.pacsave</code> esquecidos.</p>
       </div>
       <div class="card">
         <div class="label">Pós-upgrade</div>
@@ -381,7 +387,7 @@ $ borbatop --no-mouse                   <span style="color:var(--grey)"># deixa 
       <div class="card">
         <div class="label">Containers</div>
         <h3>Podman e Docker</h3>
-        <p>O escopo do cgroup (<code>libpod-…scope</code>, <code>docker-…scope</code>) liga cada processo ao container; a aba soma CPU e memória por container.</p>
+        <p>O escopo do cgroup (<code>libpod-…scope</code>, <code>docker-…scope</code>) liga cada processo ao container; a aba soma CPU e memória por container. Lista também os parados, e inicia, para, reinicia, remove e mostra logs (<code>a</code> e <code>l</code>).</p>
       </div>
       <div class="card">
         <div class="label">Terminal</div>
@@ -579,6 +585,7 @@ pub fn cpu_permille(
           <tr><td>Escopo da v1</td><td>Processos · + serviços · + pacman</td><td><strong>Decidido: processos + serviços.</strong> Pacman, rede e disco entraram junto; depois vieram conexões, boot, logs, GPU, containers, ações e replay.</td></tr>
           <tr><td>JSON</td><td><code>serde_json</code> · escritor e leitor próprios</td><td><strong>Decidido: próprios, no núcleo.</strong> Só inteiros, decimais de até duas casas, texto, listas e objetos; o resto é recusado, não arredondado.</td></tr>
           <tr><td>Renice e afinidade</td><td>por processo · por thread</td><td><strong>Decidido: por thread.</strong> No Linux a prioridade é da thread; a hora de início é conferida logo antes (não existe forma com <code>pidfd</code>).</td></tr>
+          <tr><td>Atualizar pacotes</td><td>por pacote · tudo de uma vez</td><td><strong>Decidido: repositórios sempre inteiros (<code>-Syu</code>), AUR por pacote.</strong> Atualizar um pacote isolado deixa o Arch parcialmente atualizado, o que ele não suporta. O comando roda no terminal real.</td></tr>
           <tr><td>Gravação</td><td>formato binário · JSON Lines</td><td><strong>Decidido: JSON Lines.</strong> Legível com <code>jq</code>, arquivo 0600, sem sobrescrever.</td></tr>
           <tr><td>Licença</td><td>MIT OR Apache-2.0 · GPL-3.0-or-later · outra</td><td><strong>Decidido: MIT OR Apache-2.0.</strong></td></tr>
         </tbody>
@@ -592,7 +599,7 @@ pub fn cpu_permille(
   <div class="wrap">
     <span class="proj">Borba Top · v1</span>
     <span><i>●</i> preview com dados sintéticos</span>
-    <span>Arch Linux · Rust 2024</span>
+    <span>Arch Linux · Rust edição 2024</span>
   </div>
 </footer>
 
@@ -771,6 +778,7 @@ const state = {
   desc: true,
   selPid: 5120,
   selSvc: 0,
+  selContainer: 0,
   filter: "",
   filtering: false,
   showPkg: true,
@@ -971,12 +979,14 @@ function servicesHtml() {
 
 function pacmanHtml() {
   return `<div class="body">
-    <div class="sect">Atualizações pendentes (repos oficiais · sync db local)</div>
+    <div class="sect">Atualizações pendentes (checkupdates: lista fresca)</div>
     <div class="kv"><span class="k">core</span><span>3 pacotes</span></div>
     <div class="kv"><span class="k">extra</span><span>9 pacotes</span></div>
-    <div class="sect">Atualizações pendentes do AUR (yay · precisa de rede)</div>
+    <div class="sect">Atualizações pendentes do AUR (yay)</div>
     <div class="kv"><span class="k">clojure-lsp-bin</span><span>2026.07.06-1 → 2026.10.15-1</span></div>
     <div class="kv"><span class="k">claude-desktop</span><span>5.11492.5-1 → 6.28899.2-1</span></div>
+    <div class="sect">Atualizações pendentes do AUR (paru)</div>
+    <div class="kv"><span class="k">paru instalado, nada pendente</span><span class="ok">none</span></div>
     <div class="sect">Kernel</div>
     <div class="kv"><span class="k">em execução</span><span>7.2.11-arch1-1</span></div>
     <div class="kv"><span class="k">instalado em /usr/lib/modules</span><span>7.2.12-arch1-1</span></div>
@@ -1075,15 +1085,17 @@ function gpuHtml() {
     ${reportSect("Fonte")}${reportLine("  /sys/class/drm + nvidia-smi --query-gpu=…  (AMD: gpu_busy_percent e mem_info_vram_*)", "dim")}</div>`;
 }
 
+const CONTAINERS = [
+  ["podman", "0a1b2c3d4e5f", "web", "Up 3 hours", true, "docker.io/library/nginx:latest · 3 processes · cpu 0.4% · mem 54.0M"],
+  ["podman", "9f8e7d6c5b4a", "db", "Up 3 hours", true, "docker.io/library/postgres:17 · 7 processes · cpu 1.1% · mem 212.0M"],
+  ["docker", "5c4b3a291807", "old-api", "Exited (0) 2 days ago", false, "alpine · no process visible"],
+];
 function containersHtml() {
-  return `<div class="body">${reportSect("podman")}
-    ${reportLine("  web · 0a1b2c3d4e5f · Up 3 hours", "ok")}
-    ${reportLine("    docker.io/library/nginx:latest · 3 processes · cpu 0.4% · mem 54.0M")}
-    ${reportLine("  db · 9f8e7d6c5b4a · Up 3 hours", "ok")}
-    ${reportLine("    docker.io/library/postgres:17 · 7 processes · cpu 1.1% · mem 212.0M")}
-    ${reportSect("docker")}${reportLine("  no running containers", "dim")}
-    ${reportSect("Container scopes seen in the process list")}
-    ${reportLine("  ffffffffffff · 1 processes · cpu 0.0% · mem 12.0M", "dim")}</div>`;
+  const sel = clamp(state.selContainer ?? 0, 0, CONTAINERS.length - 1);
+  const rows = CONTAINERS.map(([runtime, id, name, status, running, detail], index) =>
+    `<div class="row svc${index === sel ? " sel" : ""}" data-ctr="${index}" style="grid-template-columns:calc(var(--cw)*2) calc(var(--cw)*25) calc(var(--cw)*13) calc(var(--cw)*8) calc(var(--cw)*27) 1fr"><span class="${running ? "ok" : "dim"}">${running ? "●" : "○"}</span><span>${name}</span><span class="dim">${id}</span><span class="acc">${runtime}</span><span class="${running ? "ok" : "dim"}">${status}</span><span class="dim">${detail}</span></div>`).join("");
+  return `<div class="body"><div class="thead svc" style="grid-template-columns:calc(var(--cw)*2) calc(var(--cw)*25) calc(var(--cw)*13) calc(var(--cw)*8) calc(var(--cw)*27) 1fr"><span></span><span>NAME</span><span>ID</span><span>RUNTIME</span><span>STATUS</span><span>IMAGE · USAGE</span></div>${rows}
+    ${reportSect("Container scopes seen in the process list")}${reportLine("  ffffffffffff · 1 processes · cpu 0.0% · mem 12.0M", "dim")}</div>`;
 }
 
 /* ---------- process details (Enter) ---------- */
@@ -1123,10 +1135,12 @@ function statusHtml() {
   }
   const alive = state.msg && state.msg.until > Date.now();
   const hints = {
-    [Tab.PROCESSES]: `<kbd>↑↓</kbd>nav <kbd>⏎</kbd>detalhe <kbd>s</kbd>ordem <kbd>/</kbd>filtrar <kbd>K</kbd>sinal <kbd>n</kbd>nice <kbd>c</kbd>cpus <kbd>␣</kbd>pausa`,
-    [Tab.SERVICES]: `<kbd>↑↓</kbd>nav <kbd>/</kbd>filtrar <kbd>l</kbd>logs <kbd>a</kbd>ação <kbd>␣</kbd>pausa`,
+    [Tab.PROCESSES]: `<kbd>↑↓</kbd>nav <kbd>⏎</kbd>detalhe <kbd>s</kbd>ordem <kbd>/</kbd>filtrar <kbd>K</kbd>sinal <kbd>n</kbd>nice <kbd>c</kbd>cpus <kbd>e</kbd>exportar <kbd>␣</kbd>pausa`,
+    [Tab.SERVICES]: `<kbd>↑↓</kbd>nav <kbd>/</kbd>filtrar <kbd>l</kbd>logs <kbd>a</kbd>ação <kbd>e</kbd>exportar <kbd>␣</kbd>pausa`,
+    [Tab.PACMAN]: `<kbd>↑↓</kbd>rolar <kbd>u</kbd>atualizar <kbd>R</kbd>atualizar lista <kbd>e</kbd>exportar`,
+    [Tab.CONTAINERS]: `<kbd>↑↓</kbd>nav <kbd>a</kbd>ação <kbd>l</kbd>logs <kbd>R</kbd>atualizar <kbd>e</kbd>exportar`,
   };
-  const generic = `<kbd>↑↓</kbd>rolar <kbd>R</kbd>atualizar <kbd>␣</kbd>pausa`;
+  const generic = `<kbd>↑↓</kbd>rolar <kbd>R</kbd>atualizar <kbd>e</kbd>exportar <kbd>␣</kbd>pausa`;
   const left = alive
     ? `<span class="msg${state.msg.err ? " err" : ""}">${escapeHtml(state.msg.text)}</span>`
     : `<span>${hints[state.tab] ?? generic}</span>`;
@@ -1137,6 +1151,17 @@ function statusHtml() {
   return `<div class="status-line">${left}<span>${filter} ${mode}</span></div>`;
 }
 
+const CONTAINER_ACTIONS = [
+  ["restart", "parar e iniciar de novo"],
+  ["stop", "parar agora"],
+  ["start", "iniciar agora"],
+  ["remove", "apagar (precisa estar parado)"],
+];
+const UPDATE_OPTIONS = [
+  "official repositories · 12 pending · update everything (sudo pacman -Syu)",
+  "AUR · yay · 2 pending · update all (yay -Sua)",
+  "AUR · yay · choose packages…",
+];
 const SERVICE_ACTIONS = [
   ["restart", "parar e iniciar de novo"],
   ["stop", "parar agora"],
@@ -1146,6 +1171,21 @@ const SERVICE_ACTIONS = [
 function dialogHtml() {
   const dialog = state.dialog;
   if (!dialog) return "";
+  if (dialog.kind === "update") {
+    const lines = UPDATE_OPTIONS
+      .map((text, index) => `<div class="opt${index === dialog.index ? " on" : ""}" data-opt="${index}"> ${escapeHtml(text)} </div>`).join("");
+    return `<div class="overlay"><div class="dialog" style="min-width:560px"><h4>Update</h4>
+      <div class="dim" style="margin-bottom:8px">A atualização roda no terminal de verdade: você digita a senha lá.</div>
+      ${lines}<div class="foot">↑↓ escolher · Enter continuar · Esc cancelar</div></div></div>`;
+  }
+  if (dialog.kind === "container") {
+    const lines = CONTAINER_ACTIONS
+      .map(([name, note], index) => `<div class="opt${name === "stop" || name === "remove" ? " danger" : ""}${index === dialog.index ? " on" : ""}" data-opt="${index}">${pad(name, 8)} ${note}</div>`).join("");
+    return `<div class="overlay"><div class="dialog"><h4>Container</h4>
+      <div style="margin-bottom:8px">${escapeHtml(dialog.name)}</div>${lines}
+      ${dialog.index === 3 ? `<div class="warn" style="margin-top:6px">remove apaga o container: dados fora de volumes se perdem</div>` : ""}
+      <div class="foot">↑↓ escolher · Enter executar · Esc cancelar · pode exigir privilégios</div></div></div>`;
+  }
   if (dialog.kind === "service") {
     const lines = SERVICE_ACTIONS
       .map(([name, note], index) => `<div class="opt${name === "stop" ? " danger" : ""}${index === dialog.index ? " on" : ""}" data-opt="${index}">${pad(name, 8)} ${note}</div>`)
@@ -1207,13 +1247,28 @@ function moveSelection(delta) {
     state.selPid = list[clamp(index + delta, 0, list.length - 1)].pid;
   } else if (state.tab === Tab.SERVICES) {
     state.selSvc = clamp(state.selSvc + delta, 0, SERVICES.length - 1);
+  } else if (state.tab === Tab.CONTAINERS) {
+    state.selContainer = clamp(state.selContainer + delta, 0, CONTAINERS.length - 1);
   }
 }
 
+function jumpToTop() {
+  const list = visibleProcs();
+  if (list.length > 0) state.selPid = list[0].pid;
+}
+
 function sortBy(key) {
-  if (state.sort === key) { state.desc = !state.desc; return; }
-  state.sort = key;
-  state.desc = key !== SortKey.CMD && key !== SortKey.PID;
+  if (state.sort === key) { state.desc = !state.desc; }
+  else {
+    state.sort = key;
+    state.desc = key !== SortKey.CMD && key !== SortKey.PID;
+  }
+  jumpToTop();
+}
+
+const SLUGS = ["processes", "services", "pacman", "network-disk", "connections", "boot", "logs", "gpu", "containers"];
+function exportTab() {
+  setMsg(`exported to ./borbatop-${SLUGS[state.tab]}-20261121-210704.json (0600, sem linhas de comando)`);
 }
 
 function sendSignal(pid, signal) {
@@ -1248,8 +1303,13 @@ function applyAffinity(pid, allowed) {
 function openDialog(kind) {
   if (replay) return setMsg(READ_ONLY_MSG, true);
   if (kind === "service") {
+    if (state.tab === Tab.CONTAINERS) return void (state.dialog = { kind: "container", name: CONTAINERS[state.selContainer][2], index: 0 });
     if (state.tab !== Tab.SERVICES) return;
     return void (state.dialog = { kind, unit: SERVICES[state.selSvc][0], index: 0 });
+  }
+  if (kind === "update") {
+    if (state.tab !== Tab.PACMAN) return;
+    return void (state.dialog = { kind, index: 0 });
   }
   if (state.tab !== Tab.PROCESSES) return;
   const target = procs.find((proc) => proc.pid === state.selPid);
@@ -1275,10 +1335,16 @@ function dialogKey(key) {
     else if (key === "a") dialog.allowed.fill(true);
     else if (key === "Enter") { applyAffinity(dialog.pid, dialog.allowed); state.dialog = null; }
   } else {
-    const last = dialog.kind === "service" ? SERVICE_ACTIONS.length - 1 : 2;
+    const last = dialog.kind === "service" ? SERVICE_ACTIONS.length - 1 : dialog.kind === "container" ? CONTAINER_ACTIONS.length - 1 : dialog.kind === "update" ? UPDATE_OPTIONS.length - 1 : 2;
     if (down) dialog.index = Math.min(last, dialog.index + 1);
     else if (up) dialog.index = Math.max(0, dialog.index - 1);
-    else if (key === "Enter" && dialog.kind === "service") {
+    else if (key === "Enter" && dialog.kind === "update") {
+      setMsg("o update roda no terminal de verdade (aqui é só um preview, nada foi executado)");
+      state.dialog = null;
+    } else if (key === "Enter" && dialog.kind === "container") {
+      setMsg(`${CONTAINER_ACTIONS[dialog.index][0]} ${dialog.name}: done (simulado)`);
+      state.dialog = null;
+    } else if (key === "Enter" && dialog.kind === "service") {
       const action = SERVICE_ACTIONS[dialog.index][0];
       setMsg(`${action} ${dialog.unit} failed: Interactive authentication required.`, true);
       state.dialog = null;
@@ -1312,7 +1378,7 @@ function onKey(event) {
     return render();
   }
 
-  const handled = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter", " ", "/", "Escape", "Tab"].includes(key) || /^[1-9jksrpKncaR]$/.test(key);
+  const handled = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter", " ", "/", "Escape", "Tab"].includes(key) || /^[1-9jksrpKncaReul]$/.test(key);
   if (!handled) return;
   event.preventDefault();
 
@@ -1323,7 +1389,7 @@ function onKey(event) {
   else if (key === "ArrowLeft") seek(-1);
   else if (key === "ArrowRight") seek(1);
   else if (key === "s") sortBy(SORT_ORDER[(SORT_ORDER.indexOf(state.sort) + 1) % SORT_ORDER.length]);
-  else if (key === "r") state.desc = !state.desc;
+  else if (key === "r") { state.desc = !state.desc; jumpToTop(); }
   else if (key === "p") state.showPkg = !state.showPkg;
   else if (key === " ") state.paused = !state.paused;
   else if (key === "/" && (state.tab === Tab.PROCESSES || state.tab === Tab.SERVICES)) state.filtering = true;
@@ -1337,6 +1403,9 @@ function onKey(event) {
   else if (key === "n") openDialog("nice");
   else if (key === "c") openDialog("affinity");
   else if (key === "a") openDialog("service");
+  else if (key === "u") openDialog("update");
+  else if (key === "e") exportTab();
+  else if (key === "l" && (state.tab === Tab.SERVICES || state.tab === Tab.CONTAINERS)) setMsg("logs abertos em um overlay com rolagem (simulado no preview)");
   render();
 }
 
@@ -1349,6 +1418,7 @@ tuiEl.addEventListener("click", (event) => {
   const sortCol = event.target.closest("[data-sort]");
   const row = event.target.closest("[data-pid]");
   const svc = event.target.closest("[data-svc]");
+  const ctr = event.target.closest("[data-ctr]");
   const opt = event.target.closest("[data-opt]");
   const cpu = event.target.closest("[data-cpu]");
   if (state.detail !== null) { if (!event.target.closest(".dialog")) state.detail = null; }
@@ -1358,6 +1428,7 @@ tuiEl.addEventListener("click", (event) => {
   else if (sortCol && !state.dialog) sortBy(sortCol.dataset.sort);
   else if (row && !state.dialog) state.selPid = Number(row.dataset.pid);
   else if (svc && !state.dialog) state.selSvc = Number(svc.dataset.svc);
+  else if (ctr && !state.dialog) state.selContainer = Number(ctr.dataset.ctr);
   render();
 });
 tuiEl.addEventListener("wheel", (event) => {

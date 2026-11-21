@@ -42,6 +42,15 @@ A regra de ouro é "núcleo puro, efeitos nas bordas": tudo que interpreta texto
 - Responsabilidade: apontar leituras acima do limite (CPU, memória, swap, PSI, temperatura, units falhas) no cabeçalho de qualquer aba e anunciar cada alerta novo uma vez.
 - Namespaces principais: `borbatop_tui::alerts` (`evaluate`, `AlertThresholds`, `AlertKind`); limites vêm da tabela `[alerts]` do TOML.
 
+### Containers e atualização de pacotes
+- Responsabilidade: listar containers (rodando ou parados) de cada runtime instalado e agir sobre eles; descobrir as fontes de atualização (repositórios, cada helper do AUR) e montar o comando de atualização.
+- Namespaces principais: `borbatop_core::containers` (`ContainerInfo`, `container_id_of_unit`), `borbatop_sources::containers` (`list_containers`, `control_container`, `container_logs`, nomes validados), `borbatop_sources::pacman` (`UpgradeSource`, `AurUpgrades` por helper), `borbatop_sources::updater` (`update_command`: valida e devolve o comando, não executa), `borbatop_tui::dialog` (`UpdateDialog`, `PackagesDialog`, `ContainerDialog`).
+- Contratos de tipo: `ContainersView`/`ContainerView` (o que a aba recebe), `UpdateRequest`/`UpdateCommand`, `RepoSource`. O comando de atualização roda no terminal real: `run::update_on_terminal` desfaz a tela, executa, espera Enter e refaz a tela.
+
+### Exportação
+- Responsabilidade: gravar a aba atual em JSON do jeito que a pessoa a vê (filtro, ordem, linhas), sem linhas de comando.
+- Namespaces principais: `borbatop_tui::input` (`ExportRequest`, `ExportContent`), `borbatop::export` (`write_export`, `export_json`), `borbatop_core::clock` (`UtcDateTime`, nome do arquivo em UTC).
+
 ### Gravação e replay
 - Responsabilidade: gravar amostras em JSON Lines e reproduzi-las na tela.
 - Namespaces principais: `borbatop_core::json` (`Json`, leitor e escritor sem dependência), `borbatop::snapshot` (`model_json`, `LiveSampler`), `borbatop::recording` (`record`, `load`), `borbatop::run` (`replay`).
@@ -97,6 +106,10 @@ Regra de dependência: `borbatop → {sources, tui} → core`, nunca o inverso; 
 - Testes que dependem do host (systemd, módulos do kernel, raiz em dispositivo de bloco) saem cedo quando a máquina não os tem, para rodar em contêiner.
 - `#[expect(clippy::wildcard_enum_match_arm)]` só em `key_from_event`, porque `KeyCode` do crossterm tem muitas teclas ignoradas de propósito.
 - Nomes de scope de container (`libpod-`, `docker-`, `cri-containerd-`, `crio-` + `.scope`) seguem o driver de cgroup do systemd; `<a confirmar>` contra a documentação de cada runtime antes de depender disso fora do systemd.
+- Atualizar pacote isolado no Arch deixa o sistema parcialmente atualizado: os repositórios só têm a ação "atualizar tudo" (`sudo pacman -Syu`); o AUR permite escolher pacotes. A senha nunca passa pelo borbatop: o comando roda no terminal real.
+- A lista de upgrades prefere `checkupdates` (lê cópia temporária do banco, lista fresca sem sincronizar o sistema) e cai para `pacman -Qu`, avisando que pode estar desatualizada.
+- Depois de uma atualização longa a thread amostradora acumulou amostras: a tela as consome antes de mostrar o resultado, senão a mensagem some na hora.
+- Ao ordenar ou inverter, o cursor vai para a primeira linha: a janela segue o cursor, e um cursor no meio da lista escondia o efeito da ordenação.
 - Sem crate nova para JSON: `core::json` escreve e lê só o que o programa produz (inteiros, decimais com até duas casas, strings, arrays, objetos). O que não for isso é recusado, não arredondado.
 - Renice e afinidade valem por thread no Linux: as funções percorrem `/proc/[pid]/task`. Não existe forma com pidfd; a hora de início é conferida logo antes (risco residual de milissegundos, com efeito só em prioridade ou máscara).
 - Processos com capabilities de arquivo (ex.: `kwin_wayland`) escondem `/proc/[pid]/exe` e ficam com pacote `—`; não foi adotado fallback por `argv[0]` porque o próprio processo controla esse texto.
