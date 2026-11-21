@@ -8,10 +8,19 @@
     reason = "a benchmark that cannot read the machine must stop"
 )]
 
-use borbatop_sources::{ProcCollector, SystemCollector};
+use std::path::Path;
+
+use borbatop_sources::{FileOwners, PACMAN_LOCAL_DB, ProcCollector, SystemCollector};
 use criterion::{Criterion, criterion_group, criterion_main};
 
 fn collectors(criterion: &mut Criterion) {
+    let mut startup = criterion.benchmark_group("startup");
+    startup.sample_size(10);
+    startup.bench_function("load_package_owner_index", |bench| {
+        bench.iter(|| FileOwners::load(Path::new(PACMAN_LOCAL_DB)).map(|owners| owners.len()));
+    });
+    startup.finish();
+
     let mut processes = ProcCollector::system().expect("procfs and passwd must be readable");
     // The first call fills the per-process cache; measure the steady state.
     processes.collect().expect("first read");
