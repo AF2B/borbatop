@@ -1,0 +1,13 @@
+[package]
+name = "borbatop-sources"
+description = "Linux data sources for borbatop: procfs, sysfs, cgroup v2 and systemctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+borbatop-core.workspace = true
+
+[lints]
+workspace = true

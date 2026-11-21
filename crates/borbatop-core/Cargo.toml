@@ -1,0 +1,12 @@
+[package]
+name = "borbatop-core"
+description = "Pure sampling core of borbatop: domain types and deltas, no I/O"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

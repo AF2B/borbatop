@@ -1,0 +1,12 @@
+[package]
+name = "borbatop-tui"
+description = "Terminal UI of borbatop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
