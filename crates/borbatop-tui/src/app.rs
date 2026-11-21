@@ -527,6 +527,20 @@ impl App {
             self.sort = key;
             self.descending = key.descending_by_default();
         }
+        self.jump_to_top();
+    }
+
+    /// Selects the first row of the new order, so the effect of a sort is always visible: the
+    /// view follows the selection, and a cursor left in the middle would hide the change.
+    fn jump_to_top(&mut self) {
+        let first = self
+            .visible_processes()
+            .first()
+            .and_then(|row| self.model.processes.get(row.index))
+            .map(|process| process.pid);
+        if first.is_some() {
+            self.selected_pid = first;
+        }
     }
 
     /// Selects the row at `position` of the list the current tab shows.
@@ -574,10 +588,12 @@ impl App {
             's' => {
                 self.sort = self.sort.next();
                 self.descending = self.sort.descending_by_default();
+                self.jump_to_top();
                 None
             }
             'r' => {
                 self.descending = !self.descending;
+                self.jump_to_top();
                 None
             }
             't' => {
@@ -1050,6 +1066,35 @@ mod tests {
         assert_eq!(pids(&app), [1, 2, 3]);
         app.handle_key(Key::Char('s')); // command, ascending
         assert_eq!(pids(&app), [1, 2, 3]);
+    }
+
+    #[test]
+    fn changing_the_order_jumps_to_the_first_row_so_the_effect_is_visible() {
+        let rows: Vec<ProcessRow> = (1..=30)
+            .map(|number| row(number, 0, u64::from(number), "p"))
+            .collect();
+        let mut app = app_with(rows);
+        for _ in 0..15 {
+            app.handle_key(Key::Down);
+        }
+        assert_eq!(app.selected_pid, Some(Pid::new(15)), "cursor in the middle");
+
+        app.handle_key(Key::Char('r'));
+        assert_eq!(
+            app.selected_pid,
+            Some(Pid::new(1)),
+            "reverse: first of the new order"
+        );
+
+        app.handle_key(Key::Char('G'));
+        app.handle_key(Key::Char('s'));
+        let top = app.visible_processes().first().map(|row| row.index);
+        assert_eq!(
+            app.selected_pid,
+            top.and_then(|index| app.model.processes.get(index))
+                .map(|p| p.pid),
+            "next column: first of the new order"
+        );
     }
 
     #[test]
