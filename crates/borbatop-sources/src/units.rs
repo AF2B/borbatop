@@ -105,6 +105,9 @@ mod tests {
 
     #[test]
     fn lists_the_units_of_this_machine() {
+        if !std::path::Path::new("/run/systemd/system").exists() {
+            return; // not booted with systemd (container, chroot)
+        }
         let list = list_units().unwrap();
         assert_ne!(list.units(), []);
     }

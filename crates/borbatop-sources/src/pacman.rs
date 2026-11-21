@@ -381,8 +381,8 @@ mod tests {
     #[test]
     fn real_report_reads_pacman_without_panicking() {
         let report = collect_pacman_report(&[]);
-        assert!(report.kernel().is_ok());
+        // Kernel and upgrades depend on the host (containers have no modules or sync database).
         assert!(report.cache_size().is_ok());
-        assert!(report.upgrades().is_ok());
+        assert_eq!(report.stale().unreadable(), 0);
     }
 }

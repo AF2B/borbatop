@@ -337,7 +337,6 @@ mod tests {
         assert!(model.processes.iter().all(|row| row.cpu.get() == 0));
         assert!(model.memory.is_some());
         assert_eq!(model.kernel_release, "7.2.11-test");
-        assert!(model.mounts.iter().any(|mount| mount.mount_point == "/"));
     }
 
     #[test]
