@@ -10,6 +10,8 @@ authors = ["André Borba"]
 
 [workspace.dependencies]
 borbatop-core = { path = "crates/borbatop-core" }
+borbatop-sources = { path = "crates/borbatop-sources" }
+borbatop-tui = { path = "crates/borbatop-tui" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

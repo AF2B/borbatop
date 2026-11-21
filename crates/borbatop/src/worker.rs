@@ -1,0 +1,211 @@
+//! Background threads: the sampler, the pacman report and the journal reader.
+//!
+//! The screen never waits for I/O: every slow read runs here and arrives as a [`WorkerEvent`].
+
+use std::io;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::thread;
+
+use borbatop_core::Pid;
+use borbatop_sources::{SystemCollector, collect_pacman_report, list_units, unit_logs};
+use borbatop_tui::{Model, PacmanView};
+
+use crate::config::Settings;
+use crate::convert::pacman_view;
+use crate::model::ModelBuilder;
+
+const SERVICES_EVERY_SAMPLES: u32 = 5;
+const JOURNAL_LINES: u16 = 300;
+const OSRELEASE: &str = "/proc/sys/kernel/osrelease";
+
+/// What a background thread reports to the screen.
+pub enum WorkerEvent {
+    /// A new sample.
+    Model(Box<Model>),
+    /// A sample could not be taken.
+    Failure(String),
+    /// A freshly built Pacman report.
+    Pacman(Box<PacmanView>),
+    /// The journal of a unit, or why it could not be read.
+    Logs {
+        /// Unit the text belongs to.
+        unit: String,
+        /// Journal text, or the failure message.
+        result: Result<String, String>,
+    },
+}
+
+/// Keeps the sampler running; dropping it asks the thread to stop.
+pub struct SamplerHandle {
+    _stop: Sender<()>,
+}
+
+/// Starts the sampler thread.
+///
+/// The thread loads the user and package tables first, so the screen opens at once and the
+/// first sample arrives a moment later.
+///
+/// # Arguments
+///
+/// * `settings` - sampling interval and history length
+/// * `events` - where samples are sent
+///
+/// # Errors
+///
+/// Returns the OS error if the thread cannot be created.
+pub fn spawn_sampler(settings: Settings, events: Sender<WorkerEvent>) -> io::Result<SamplerHandle> {
+    let (stop, stop_signal) = channel();
+    thread::Builder::new()
+        .name("borbatop-sampler".to_owned())
+        .spawn(move || sample_forever(settings, &events, &stop_signal))?;
+    Ok(SamplerHandle { _stop: stop })
+}
+
+fn sample_forever(settings: Settings, events: &Sender<WorkerEvent>, stop: &Receiver<()>) {
+    let (mut collector, page_size) = match SystemCollector::system()
+        .and_then(|collector| SystemCollector::page_size().map(|page_size| (collector, page_size)))
+    {
+        Ok(ready) => ready,
+        Err(error) => {
+            let _delivered = events.send(WorkerEvent::Failure(error.to_string()));
+            return;
+        }
+    };
+    // The kernel release only decorates the header: when unreadable, the header omits it.
+    let kernel = std::fs::read_to_string(OSRELEASE)
+        .map_or_else(|_| String::new(), |text| text.trim().to_owned());
+    let mut builder = ModelBuilder::new(settings.history_len, page_size, kernel);
+    let mut sample_number = 0_u32;
+
+    loop {
+        if sample_number.is_multiple_of(SERVICES_EVERY_SAMPLES) {
+            builder.set_services(list_units().map_err(|error| error.to_string()));
+        }
+        let event = match collector.collect() {
+            Ok(snapshot) => WorkerEvent::Model(Box::new(builder.build(&snapshot))),
+            Err(error) => WorkerEvent::Failure(error.to_string()),
+        };
+        if events.send(event).is_err() {
+            return;
+        }
+        sample_number = sample_number.wrapping_add(1);
+
+        match stop.recv_timeout(settings.interval) {
+            Err(RecvTimeoutError::Timeout) => {}
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
+/// Builds the Pacman report on its own thread.
+///
+/// # Arguments
+///
+/// * `events` - where the report is sent
+/// * `processes` - `(pid, name)` of the running processes, to look for stale libraries
+///
+/// # Errors
+///
+/// Returns the OS error if the thread cannot be created.
+pub fn spawn_pacman(events: Sender<WorkerEvent>, processes: Vec<(Pid, String)>) -> io::Result<()> {
+    thread::Builder::new()
+        .name("borbatop-pacman".to_owned())
+        .spawn(move || {
+            let view = pacman_view(&collect_pacman_report(&processes));
+            // The receiver is gone only when the program is quitting.
+            let _delivered = events.send(WorkerEvent::Pacman(Box::new(view)));
+        })
+        .map(|_handle| ())
+}
+
+/// Reads the journal of `unit` on its own thread.
+///
+/// # Arguments
+///
+/// * `events` - where the text is sent
+/// * `unit` - unit to read
+///
+/// # Errors
+///
+/// Returns the OS error if the thread cannot be created.
+pub fn spawn_logs(events: Sender<WorkerEvent>, unit: String) -> io::Result<()> {
+    thread::Builder::new()
+        .name("borbatop-journal".to_owned())
+        .spawn(move || {
+            let result = unit_logs(&unit, JOURNAL_LINES).map_err(|error| error.to_string());
+            let _delivered = events.send(WorkerEvent::Logs { unit, result });
+        })
+        .map(|_handle| ())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use std::sync::mpsc::RecvTimeoutError as Timeout;
+    use std::time::Duration;
+
+    use borbatop_tui::ThemeKind;
+
+    use super::*;
+
+    const PATIENCE: Duration = Duration::from_secs(20);
+
+    fn settings(interval_ms: u64) -> Settings {
+        Settings {
+            interval: Duration::from_millis(interval_ms),
+            theme: ThemeKind::Borba,
+            tree: false,
+            show_package: true,
+            history_len: 8,
+        }
+    }
+
+    #[test]
+    fn sampler_streams_models_until_its_handle_is_dropped() {
+        let (events, received) = channel();
+        let handle = spawn_sampler(settings(200), events).unwrap();
+
+        for _ in 0..2 {
+            match received.recv_timeout(PATIENCE).unwrap() {
+                WorkerEvent::Model(model) => assert_ne!(model.processes.len(), 0),
+                WorkerEvent::Failure(reason) => panic!("sampler failed: {reason}"),
+                WorkerEvent::Pacman(_) | WorkerEvent::Logs { .. } => panic!("unexpected event"),
+            }
+        }
+        drop(handle);
+        let mut drained = 0;
+        loop {
+            match received.recv_timeout(Duration::from_secs(2)) {
+                Ok(_) => drained += 1,
+                Err(Timeout::Disconnected) => break,
+                Err(Timeout::Timeout) => panic!("sampler did not stop"),
+            }
+            assert!(drained < 10, "sampler kept running");
+        }
+    }
+
+    #[test]
+    fn pacman_report_arrives_as_an_event() {
+        let (events, received) = channel();
+        spawn_pacman(events, Vec::new()).unwrap();
+        assert!(matches!(
+            received.recv_timeout(PATIENCE).unwrap(),
+            WorkerEvent::Pacman(_)
+        ));
+    }
+
+    #[test]
+    fn journal_of_an_invalid_unit_comes_back_as_a_failure_message() {
+        let (events, received) = channel();
+        spawn_logs(events, "--bad".to_owned()).unwrap();
+        match received.recv_timeout(PATIENCE).unwrap() {
+            WorkerEvent::Logs { unit, result } => {
+                assert_eq!(unit, "--bad");
+                assert!(result.unwrap_err().contains("invalid unit name"));
+            }
+            WorkerEvent::Model(_) | WorkerEvent::Failure(_) | WorkerEvent::Pacman(_) => {
+                panic!("unexpected event")
+            }
+        }
+    }
+}

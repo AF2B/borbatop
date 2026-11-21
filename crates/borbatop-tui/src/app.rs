@@ -253,6 +253,12 @@ impl App {
         });
     }
 
+    /// The sample currently shown.
+    #[must_use]
+    pub const fn model(&self) -> &Model {
+        &self.model
+    }
+
     /// Whether the display is frozen.
     #[must_use]
     pub const fn is_paused(&self) -> bool {
