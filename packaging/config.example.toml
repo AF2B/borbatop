@@ -15,3 +15,16 @@ show_package = true
 
 # Samples kept for sparklines (8 to 600).
 history = 60
+
+# Levels from which a reading raises an alert in the header.
+[alerts]
+# Machine-wide CPU usage, in percent (1 to 100).
+cpu_percent = 90
+# Share of memory in use, in percent (1 to 100).
+memory_percent = 90
+# Share of swap in use, in percent (1 to 100).
+swap_percent = 90
+# Share of the last 10 seconds some task stalled on CPU, memory or I/O (PSI), in percent.
+pressure_percent = 20
+# CPU temperature, in degrees Celsius (30 to 120).
+temperature_celsius = 85

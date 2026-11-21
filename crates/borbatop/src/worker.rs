@@ -189,6 +189,7 @@ mod tests {
             tree: false,
             show_package: true,
             history_len: 8,
+            alerts: borbatop_tui::AlertThresholds::default(),
         }
     }
 

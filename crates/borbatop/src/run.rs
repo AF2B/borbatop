@@ -35,6 +35,7 @@ pub fn run(settings: Settings) -> io::Result<()> {
         tree: settings.tree,
         show_package: settings.show_package,
         history_len: settings.history_len,
+        alerts: settings.alerts,
     });
 
     let mut terminal = ratatui::try_init()?;

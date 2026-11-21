@@ -6,7 +6,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use borbatop_tui::ThemeKind;
+use borbatop_tui::{AlertThresholds, ThemeKind};
 use clap::ValueEnum;
 use serde::Deserialize;
 
@@ -16,6 +16,15 @@ const MAX_INTERVAL_MS: u64 = 10_000;
 const DEFAULT_HISTORY: usize = 60;
 const MIN_HISTORY: usize = 8;
 const MAX_HISTORY: usize = 600;
+const DEFAULT_ALERT_CPU_PERCENT: u64 = 90;
+const DEFAULT_ALERT_MEMORY_PERCENT: u64 = 90;
+const DEFAULT_ALERT_SWAP_PERCENT: u64 = 90;
+const DEFAULT_ALERT_PRESSURE_PERCENT: u64 = 20;
+const DEFAULT_ALERT_TEMPERATURE: u64 = 85;
+const MIN_PERCENT: u64 = 1;
+const MAX_PERCENT: u64 = 100;
+const MIN_ALERT_TEMPERATURE: u64 = 30;
+const MAX_ALERT_TEMPERATURE: u64 = 120;
 const CONFIG_DIR: &str = "borbatop";
 const CONFIG_FILE: &str = "config.toml";
 const USER_CONFIG_DIR: &str = ".config";
@@ -48,6 +57,18 @@ pub struct FileConfig {
     tree: Option<bool>,
     show_package: Option<bool>,
     history: Option<usize>,
+    alerts: Option<AlertsFile>,
+}
+
+/// The `[alerts]` table of `config.toml`.
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct AlertsFile {
+    cpu_percent: Option<u64>,
+    memory_percent: Option<u64>,
+    swap_percent: Option<u64>,
+    pressure_percent: Option<u64>,
+    temperature_celsius: Option<u64>,
 }
 
 /// Values given on the command line, which win over the file.
@@ -76,6 +97,8 @@ pub struct Settings {
     pub show_package: bool,
     /// Samples kept for sparklines.
     pub history_len: usize,
+    /// Levels from which a reading raises an alert.
+    pub alerts: AlertThresholds,
 }
 
 /// Why the settings could not be loaded.
@@ -201,6 +224,46 @@ fn within(field: &'static str, value: u64, min: u64, max: u64) -> Result<u64, Co
     }
 }
 
+fn percent(field: &'static str, value: Option<u64>, default: u64) -> Result<u32, ConfigError> {
+    let value = within(field, value.unwrap_or(default), MIN_PERCENT, MAX_PERCENT)?;
+    Ok(u32::try_from(value).unwrap_or(u32::MAX))
+}
+
+fn resolve_alerts(file: Option<&AlertsFile>) -> Result<AlertThresholds, ConfigError> {
+    let none = AlertsFile::default();
+    let file = file.unwrap_or(&none);
+    let temperature = within(
+        "alerts.temperature_celsius",
+        file.temperature_celsius
+            .unwrap_or(DEFAULT_ALERT_TEMPERATURE),
+        MIN_ALERT_TEMPERATURE,
+        MAX_ALERT_TEMPERATURE,
+    )?;
+    Ok(AlertThresholds::from_percent(
+        percent(
+            "alerts.cpu_percent",
+            file.cpu_percent,
+            DEFAULT_ALERT_CPU_PERCENT,
+        )?,
+        percent(
+            "alerts.memory_percent",
+            file.memory_percent,
+            DEFAULT_ALERT_MEMORY_PERCENT,
+        )?,
+        percent(
+            "alerts.swap_percent",
+            file.swap_percent,
+            DEFAULT_ALERT_SWAP_PERCENT,
+        )?,
+        percent(
+            "alerts.pressure_percent",
+            file.pressure_percent,
+            DEFAULT_ALERT_PRESSURE_PERCENT,
+        )?,
+        i32::try_from(temperature).unwrap_or(i32::MAX),
+    ))
+}
+
 impl Settings {
     /// Combines defaults, the file and the command line, in that order of priority.
     ///
@@ -231,6 +294,7 @@ impl Settings {
         )?;
 
         Ok(Self {
+            alerts: resolve_alerts(file.alerts.as_ref())?,
             interval: Duration::from_millis(interval_ms),
             theme: overrides
                 .theme
@@ -360,6 +424,39 @@ mod tests {
         let from_example = Settings::resolve(&example, Overrides::default()).unwrap();
         let defaults = Settings::resolve(&FileConfig::default(), Overrides::default()).unwrap();
         assert_eq!(from_example, defaults);
+    }
+
+    #[test]
+    fn alert_thresholds_default_to_the_screens_defaults_and_can_be_changed() {
+        let defaults = Settings::resolve(&FileConfig::default(), Overrides::default()).unwrap();
+        assert_eq!(defaults.alerts, AlertThresholds::default());
+
+        let custom = file("[alerts]\ncpu_percent = 75\ntemperature_celsius = 70\n");
+        let alerts = Settings::resolve(&custom, Overrides::default())
+            .unwrap()
+            .alerts;
+        assert_eq!(alerts.cpu.get(), 750);
+        assert_eq!(alerts.temperature_degrees, 70);
+        assert_eq!(alerts.memory, AlertThresholds::default().memory);
+    }
+
+    #[test]
+    fn alert_values_out_of_range_name_their_field() {
+        for (text, field) in [
+            ("[alerts]\ncpu_percent = 0", "alerts.cpu_percent"),
+            ("[alerts]\nmemory_percent = 101", "alerts.memory_percent"),
+            (
+                "[alerts]\ntemperature_celsius = 5",
+                "alerts.temperature_celsius",
+            ),
+        ] {
+            let error = Settings::resolve(&file(text), Overrides::default()).unwrap_err();
+            assert!(
+                matches!(error, ConfigError::OutOfRange { field: name, .. } if name == field),
+                "{text}"
+            );
+        }
+        assert!(parse("[alerts]\ncolour = 1", Path::new("c.toml")).is_err());
     }
 
     #[test]

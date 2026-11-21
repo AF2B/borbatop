@@ -6,6 +6,7 @@ use std::collections::HashSet;
 
 use borbatop_core::{ActiveState, Pid, ProcessId, UnitRow, order_as_tree};
 
+use crate::alerts::{Alert, AlertThresholds, evaluate};
 use crate::dialog::{Dialog, DialogOutcome};
 use crate::input::{Command, Key, SortKey, Tab};
 use crate::model::{Model, PacmanView, ProcessRow};
@@ -28,6 +29,8 @@ pub struct UiConfig {
     pub show_package: bool,
     /// Number of samples kept for sparklines.
     pub history_len: usize,
+    /// Levels from which a reading raises an alert.
+    pub alerts: AlertThresholds,
 }
 
 impl Default for UiConfig {
@@ -37,6 +40,7 @@ impl Default for UiConfig {
             tree: false,
             show_package: true,
             history_len: DEFAULT_HISTORY_LEN,
+            alerts: AlertThresholds::default(),
         }
     }
 }
@@ -146,6 +150,7 @@ pub struct App {
     pub(crate) dialog: Option<Dialog>,
     pub(crate) logs: Option<LogView>,
     pub(crate) message: Option<Message>,
+    pub(crate) alerts: Vec<Alert>,
     pub(crate) pacman: PacmanState,
     pub(crate) scroll: usize,
     /// Largest useful scroll offset, learned while drawing.
@@ -184,6 +189,7 @@ impl App {
             dialog: None,
             logs: None,
             message: None,
+            alerts: Vec::new(),
             pacman: PacmanState::NotRequested,
             scroll: 0,
             max_scroll: Cell::new(0),
@@ -198,8 +204,28 @@ impl App {
     pub fn apply_model(&mut self, model: Model) {
         if self.playback == Playback::Live {
             self.model = model;
+            self.refresh_alerts();
         }
         self.ensure_selection();
+    }
+
+    /// Re-evaluates the alerts and announces the ones that just appeared.
+    fn refresh_alerts(&mut self) {
+        let current = evaluate(&self.model, &self.config.alerts);
+        let announced = current
+            .iter()
+            .find(|alert| !self.alerts.iter().any(|known| known.kind == alert.kind))
+            .map(ToString::to_string);
+        self.alerts = current;
+        if let Some(text) = announced {
+            self.notify(format!("alert: {text}"), MessageKind::Error);
+        }
+    }
+
+    /// The conditions currently above their thresholds.
+    #[must_use]
+    pub fn alerts(&self) -> &[Alert] {
+        &self.alerts
     }
 
     /// Stores a freshly built Pacman report.
@@ -848,6 +874,42 @@ mod tests {
         app.handle_key(Key::Char('2'));
         app.handle_key(Key::Char('K'));
         assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn a_new_alert_is_listed_and_announced_only_once() {
+        let mut app = app_with(vec![]);
+        let mut model = Model::empty(4);
+        model.cpu_history.push(990);
+
+        app.apply_model(model.clone());
+        assert_eq!(app.alerts().len(), 1);
+        let announced = app.message.take().unwrap();
+        assert!(
+            announced.text.starts_with("alert: cpu"),
+            "{}",
+            announced.text
+        );
+        assert_eq!(announced.kind, MessageKind::Error);
+
+        app.apply_model(model);
+        assert!(
+            app.message.is_none(),
+            "an alert that is already known is silent"
+        );
+
+        app.apply_model(Model::empty(4));
+        assert_eq!(app.alerts().len(), 0);
+    }
+
+    #[test]
+    fn paused_display_keeps_its_alerts() {
+        let mut app = app_with(vec![]);
+        app.handle_key(Key::Char(' '));
+        let mut model = Model::empty(4);
+        model.cpu_history.push(990);
+        app.apply_model(model);
+        assert_eq!(app.alerts().len(), 0);
     }
 
     #[test]

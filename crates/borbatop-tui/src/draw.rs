@@ -49,6 +49,9 @@ const FS_TYPE_WIDTH: usize = 6;
 const INTERFACE_WIDTH: usize = 12;
 const RATE_WIDTH: usize = 10;
 const HEADER_INFO_WIDTH: u16 = 48;
+const HEADER_LOGO_WIDTH: u16 = 24;
+const ALERT_MARK: &str = "⚠ ";
+const ALERT_SEPARATOR: &str = " · ";
 const JOURNAL_MARGIN_X: u16 = 4;
 const JOURNAL_MARGIN_Y: u16 = 2;
 
@@ -158,9 +161,12 @@ fn panel<'a>(title: &str, styles: &Styles) -> Block<'a> {
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
-    let [left, right] =
-        Layout::horizontal([Constraint::Min(20), Constraint::Length(HEADER_INFO_WIDTH)])
-            .areas(area);
+    let [left, middle, right] = Layout::horizontal([
+        Constraint::Length(HEADER_LOGO_WIDTH),
+        Constraint::Min(0),
+        Constraint::Length(HEADER_INFO_WIDTH),
+    ])
+    .areas(area);
     let logo = Line::from(vec![
         Span::styled(WORDMARK, styles.strong),
         Span::styled(WORDMARK_DOT, styles.accent.add_modifier(Modifier::BOLD)),
@@ -170,6 +176,10 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
         ),
     ]);
     frame.render_widget(Paragraph::new(logo).style(styles.base), left);
+
+    if let Some(banner) = alert_banner(app, styles) {
+        frame.render_widget(Paragraph::new(banner).style(styles.base), middle);
+    }
 
     let kernel = if app.model.kernel_release.is_empty() {
         String::from("linux")
@@ -188,6 +198,23 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
             .style(styles.base),
         right,
     );
+}
+
+/// The alerts as one line for the header, or `None` when everything is calm.
+fn alert_banner<'a>(app: &App, styles: &Styles) -> Option<Line<'a>> {
+    if app.alerts.is_empty() {
+        return None;
+    }
+    let text = app
+        .alerts
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(ALERT_SEPARATOR);
+    Some(Line::from(vec![
+        Span::styled(ALERT_MARK, styles.danger.add_modifier(Modifier::BOLD)),
+        Span::styled(text, styles.danger),
+    ]))
 }
 
 fn draw_top(frame: &mut Frame, area: Rect, model: &Model, styles: &Styles) {
@@ -1286,6 +1313,19 @@ mod tests {
         for expected in ["SEND SIGNAL", "SIGTERM", "SIGKILL", "end now, no cleanup"] {
             assert!(text.contains(expected), "missing {expected:?}");
         }
+    }
+
+    #[test]
+    fn alerts_appear_in_the_header_and_vanish_when_calm() {
+        let mut app = App::new(UiConfig::default());
+        let calm = screen(&app);
+        assert!(!calm.contains('⚠'));
+
+        let mut model = app.model().clone();
+        model.cpu_history.push(990);
+        app.apply_model(model);
+        let text = screen(&app);
+        assert!(text.contains("⚠ cpu 99.0%"), "{text}");
     }
 
     #[test]
