@@ -2,7 +2,7 @@
 
 use borbatop_core::{Nice, Pid, ProcessId};
 
-use crate::model::{PacmanView, Report};
+use crate::model::{ContainersView, PacmanView, Report};
 
 /// A key press, independent of any terminal library.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,8 +94,8 @@ impl Tab {
     #[must_use]
     pub const fn is_report(self) -> bool {
         match self {
-            Self::Connections | Self::Boot | Self::Logs | Self::Gpu | Self::Containers => true,
-            Self::Processes | Self::Services | Self::Pacman | Self::Io => false,
+            Self::Connections | Self::Boot | Self::Logs | Self::Gpu => true,
+            Self::Processes | Self::Services | Self::Pacman | Self::Io | Self::Containers => false,
         }
     }
 
@@ -274,6 +274,46 @@ pub enum Seek {
     Forward,
 }
 
+/// An action offered for a container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerChoice {
+    /// Stop and start again.
+    Restart,
+    /// Stop it.
+    Stop,
+    /// Start a stopped container.
+    Start,
+    /// Delete a stopped container.
+    Remove,
+}
+
+impl ContainerChoice {
+    /// Choices in the order the dialog lists them.
+    pub const ALL: [Self; 4] = [Self::Restart, Self::Stop, Self::Start, Self::Remove];
+
+    /// Action name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Restart => "restart",
+            Self::Stop => "stop",
+            Self::Start => "start",
+            Self::Remove => "remove",
+        }
+    }
+
+    /// What the action does, in one phrase.
+    #[must_use]
+    pub const fn effect(self) -> &'static str {
+        match self {
+            Self::Restart => "stop, then start again",
+            Self::Stop => "stop it now",
+            Self::Start => "start it now",
+            Self::Remove => "delete it (must be stopped)",
+        }
+    }
+}
+
 /// How the process table was ordered when it was exported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExportOrder {
@@ -296,6 +336,8 @@ pub enum ExportContent {
     Pacman(Box<PacmanView>),
     /// Network, disks and mounts of the current sample.
     Io,
+    /// The containers, with their state and usage.
+    Containers(Box<ContainersView>),
     /// The report of an on-demand tab.
     Report(Report),
 }
@@ -359,6 +401,26 @@ pub enum Command {
     },
     /// Build the report of a tab that loads on demand.
     LoadReport(Tab),
+    /// List the containers of every installed runtime.
+    LoadContainers,
+    /// Start, stop, restart or remove a container.
+    ControlContainer {
+        /// Runtime that owns the container.
+        runtime: String,
+        /// Container identifier.
+        id: String,
+        /// What to do.
+        action: ContainerChoice,
+    },
+    /// Show the latest log lines of a container.
+    LoadContainerLogs {
+        /// Runtime that owns the container.
+        runtime: String,
+        /// Container identifier.
+        id: String,
+        /// Container name, for the overlay title.
+        name: String,
+    },
     /// Rebuild the Pacman report.
     RefreshPacman,
     /// Fetch the journal of a unit.
@@ -378,7 +440,7 @@ mod tests {
         assert_eq!(Tab::wrapping(-1), Tab::Containers);
         assert_eq!(Tab::wrapping(9), Tab::Processes);
         assert_eq!(Tab::wrapping(11), Tab::Pacman);
-        assert_eq!(Tab::ALL.iter().filter(|tab| tab.is_report()).count(), 5);
+        assert_eq!(Tab::ALL.iter().filter(|tab| tab.is_report()).count(), 4);
         for tab in Tab::ALL {
             assert_eq!(Tab::ALL.get(tab.index()), Some(&tab));
         }

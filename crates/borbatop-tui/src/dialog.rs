@@ -5,7 +5,7 @@
 
 use borbatop_core::{Nice, ProcessId};
 
-use crate::input::{Command, Key, ServiceAction, SignalChoice};
+use crate::input::{Command, ContainerChoice, Key, ServiceAction, SignalChoice};
 use crate::widgets::fit;
 
 const NICE_FINE_STEP: i8 = 1;
@@ -96,6 +96,14 @@ pub(crate) struct ServiceDialog {
     selected: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContainerDialog {
+    runtime: String,
+    id: String,
+    name: String,
+    selected: usize,
+}
+
 /// The open modal dialog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Dialog {
@@ -103,6 +111,7 @@ pub(crate) enum Dialog {
     Nice(NiceDialog),
     Affinity(AffinityDialog),
     Service(ServiceDialog),
+    Container(ContainerDialog),
 }
 
 impl Dialog {
@@ -143,6 +152,16 @@ impl Dialog {
         })
     }
 
+    /// An action picker for one container.
+    pub(crate) fn container(runtime: &str, id: &str, name: &str) -> Self {
+        Self::Container(ContainerDialog {
+            runtime: runtime.to_owned(),
+            id: id.to_owned(),
+            name: name.to_owned(),
+            selected: 0,
+        })
+    }
+
     /// Applies a key press.
     pub(crate) fn handle_key(&mut self, key: Key) -> DialogOutcome {
         if key == Key::Escape || key == Key::Char('q') {
@@ -153,6 +172,7 @@ impl Dialog {
             Self::Nice(dialog) => dialog.handle_key(key),
             Self::Affinity(dialog) => dialog.handle_key(key),
             Self::Service(dialog) => dialog.handle_key(key),
+            Self::Container(dialog) => dialog.handle_key(key),
         }
     }
 
@@ -163,6 +183,7 @@ impl Dialog {
             Self::Nice(dialog) => dialog.view(width),
             Self::Affinity(dialog) => dialog.view(width),
             Self::Service(dialog) => dialog.view(width),
+            Self::Container(dialog) => dialog.view(width),
         }
     }
 }
@@ -411,6 +432,60 @@ impl ServiceDialog {
     }
 }
 
+impl ContainerDialog {
+    fn handle_key(&mut self, key: Key) -> DialogOutcome {
+        let last = ContainerChoice::ALL.len().saturating_sub(1);
+        self.selected = step(self.selected, key, last);
+        if key != Key::Enter {
+            return DialogOutcome::Open;
+        }
+        ContainerChoice::ALL
+            .get(self.selected)
+            .map_or(DialogOutcome::Closed, |&action| {
+                DialogOutcome::Confirmed(Command::ControlContainer {
+                    runtime: self.runtime.clone(),
+                    id: self.id.clone(),
+                    action,
+                })
+            })
+    }
+
+    fn view(&self, width: usize) -> DialogView {
+        let mut lines = vec![
+            target_line(&self.name, &format!("{} {}", self.runtime, self.id), width),
+            DialogLine::blank(),
+        ];
+        for (position, action) in ContainerChoice::ALL.iter().enumerate() {
+            let destructive = matches!(action, ContainerChoice::Stop | ContainerChoice::Remove);
+            let tone = match (position == self.selected, destructive) {
+                (true, true) => Tone::DangerSelected,
+                (true, false) => Tone::Selected,
+                (false, true) => Tone::Danger,
+                (false, false) => Tone::Plain,
+            };
+            lines.push(DialogLine::plain(
+                format!(" {:<8} {} ", action.name(), action.effect()),
+                tone,
+            ));
+        }
+        lines.push(DialogLine::blank());
+        if ContainerChoice::ALL.get(self.selected) == Some(&ContainerChoice::Remove) {
+            lines.push(DialogLine::plain(
+                "remove deletes the container: data outside volumes is lost",
+                Tone::Danger,
+            ));
+        }
+        lines.push(DialogLine::plain(
+            "↑↓ choose · Enter run · Esc cancel · may need privileges",
+            Tone::Secondary,
+        ));
+        DialogView {
+            title: "CONTAINER",
+            lines,
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -429,6 +504,7 @@ mod tests {
             Dialog::nice(id(), "tool", Nice::clamped(0)),
             Dialog::affinity(id(), "tool", 4),
             Dialog::service("sshd.service"),
+            Dialog::container("docker", "abc", "web"),
         ];
         for mut dialog in dialogs {
             assert_eq!(
@@ -555,6 +631,37 @@ mod tests {
             DialogOutcome::Confirmed(Command::ControlUnit {
                 unit: "sshd.service".to_owned(),
                 action: ServiceAction::Stop,
+            })
+        );
+    }
+
+    #[test]
+    fn container_dialog_offers_restart_first_and_warns_before_remove() {
+        let mut dialog = Dialog::container("podman", "0a1b2c3d4e5f", "web");
+        let first = dialog.view(60);
+        assert!(
+            !first
+                .lines
+                .iter()
+                .any(|line| line.text().contains("data outside volumes"))
+        );
+
+        for _ in 0..3 {
+            dialog.handle_key(Key::Down);
+        }
+        let warned = dialog.view(60);
+        assert!(
+            warned
+                .lines
+                .iter()
+                .any(|line| line.text().contains("data outside volumes"))
+        );
+        assert_eq!(
+            dialog.handle_key(Key::Enter),
+            DialogOutcome::Confirmed(Command::ControlContainer {
+                runtime: "podman".to_owned(),
+                id: "0a1b2c3d4e5f".to_owned(),
+                action: ContainerChoice::Remove,
             })
         );
     }

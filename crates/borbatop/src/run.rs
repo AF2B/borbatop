@@ -15,12 +15,12 @@ use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, E
 use ratatui::crossterm::execute;
 
 use crate::config::Settings;
-use crate::convert::{signal_of, unit_action_of};
+use crate::convert::{container_action_of, signal_of, unit_action_of};
 use crate::export::write_export;
 use crate::reports::ProcessUsage;
 use crate::worker::{
-    WorkerEvent, spawn_detail, spawn_logs, spawn_pacman, spawn_report, spawn_sampler,
-    spawn_unit_action,
+    WorkerEvent, spawn_container_action, spawn_container_logs, spawn_containers, spawn_detail,
+    spawn_logs, spawn_pacman, spawn_report, spawn_sampler, spawn_unit_action,
 };
 
 const INPUT_POLL: Duration = Duration::from_millis(100);
@@ -198,6 +198,7 @@ fn apply(update: WorkerEvent, app: &mut App) {
         WorkerEvent::Logs { unit, result } => app.set_logs(&unit, result),
         WorkerEvent::Overlay { title, result } => app.set_overlay(title, result),
         WorkerEvent::Report { tab, result } => app.set_report(tab, result),
+        WorkerEvent::Containers(result) => app.set_containers(result.map(|view| *view)),
         WorkerEvent::Outcome(Ok(text)) => app.notify(text, MessageKind::Info),
         WorkerEvent::Outcome(Err(text)) => app.notify(text, MessageKind::Error),
     }
@@ -220,6 +221,8 @@ fn dispatch(
         Command::LoadReport(_)
         | Command::RefreshPacman
         | Command::LoadLogs { .. }
+        | Command::LoadContainers
+        | Command::LoadContainerLogs { .. }
         | Command::Export(_) => {
             return execute(command, app, events);
         }
@@ -227,6 +230,7 @@ fn dispatch(
         | Command::SetNice { .. }
         | Command::SetAffinity { .. }
         | Command::ControlUnit { .. }
+        | Command::ControlContainer { .. }
         | Command::LoadDetail { .. } => app.notify(
             "this is a recording: nothing here can be acted on",
             MessageKind::Error,
@@ -249,6 +253,28 @@ fn execute(command: Command, app: &mut App, events: &Sender<WorkerEvent>) -> boo
             report_start(app, "start systemctl", started);
         }
         Command::Export(request) => export(app, &request),
+        Command::LoadContainers => {
+            let started = spawn_containers(events.clone(), usage_of(app.model()));
+            report_start(app, "list the containers", started);
+        }
+        Command::ControlContainer {
+            runtime,
+            id,
+            action,
+        } => {
+            let started = spawn_container_action(
+                events.clone(),
+                runtime,
+                id,
+                container_action_of(action),
+                usage_of(app.model()),
+            );
+            report_start(app, "run the container command", started);
+        }
+        Command::LoadContainerLogs { runtime, id, name } => {
+            let started = spawn_container_logs(events.clone(), runtime, id, name);
+            report_start(app, "read the container logs", started);
+        }
         Command::LoadDetail { id, label } => {
             report_start(
                 app,
@@ -257,7 +283,7 @@ fn execute(command: Command, app: &mut App, events: &Sender<WorkerEvent>) -> boo
             );
         }
         Command::LoadReport(tab) => {
-            let started = spawn_report(events.clone(), tab, usage_of(app.model()));
+            let started = spawn_report(events.clone(), tab);
             report_start(app, &format!("build the {} report", tab.label()), started);
         }
         Command::RefreshPacman => {

@@ -8,23 +8,24 @@ use std::thread;
 
 use borbatop_core::{Pid, ProcessId};
 use borbatop_sources::{
-    JournalLevel, SystemCollector, UnitAction, collect_connections, collect_gpus,
-    collect_pacman_report, control_unit, list_containers, list_units, process_detail,
-    startup_blame, startup_summary, system_journal, unit_logs,
+    ContainerAction, JournalLevel, SystemCollector, UnitAction, collect_connections, collect_gpus,
+    collect_pacman_report, container_logs, control_container, control_unit, list_containers,
+    list_units, process_detail, startup_blame, startup_summary, system_journal, unit_logs,
 };
-use borbatop_tui::{Model, PacmanView, Report, Tab};
+use borbatop_tui::{ContainersView, Model, PacmanView, Report, Tab};
 
 use crate::config::Settings;
 use crate::convert::pacman_view;
 use crate::model::ModelBuilder;
 use crate::reports::{
-    ProcessUsage, boot_report, connections_report, containers_report, detail_text, gpu_report,
+    ProcessUsage, boot_report, connections_report, containers_view, detail_text, gpu_report,
     logs_report,
 };
 
 const SERVICES_EVERY_SAMPLES: u32 = 5;
 const JOURNAL_LINES: u16 = 300;
 const SYSTEM_JOURNAL_LINES: u16 = 100;
+const CONTAINER_LOG_LINES: u16 = 300;
 const OSRELEASE: &str = "/proc/sys/kernel/osrelease";
 
 /// What a background thread reports to the screen.
@@ -51,6 +52,8 @@ pub enum WorkerEvent {
         /// The text, or the failure message.
         result: Result<String, String>,
     },
+    /// The listed containers, or why they could not be listed.
+    Containers(Result<Box<ContainersView>, String>),
     /// The report of an on-demand tab.
     Report {
         /// The tab it belongs to.
@@ -195,20 +198,15 @@ pub fn spawn_detail(events: Sender<WorkerEvent>, id: ProcessId, label: String) -
 ///
 /// * `events` - where the report is sent
 /// * `tab` - the tab to build
-/// * `usage` - the running processes, to total up per container
 ///
 /// # Errors
 ///
 /// Returns the OS error if the thread cannot be created.
-pub fn spawn_report(
-    events: Sender<WorkerEvent>,
-    tab: Tab,
-    usage: Vec<ProcessUsage>,
-) -> io::Result<()> {
+pub fn spawn_report(events: Sender<WorkerEvent>, tab: Tab) -> io::Result<()> {
     thread::Builder::new()
         .name("borbatop-report".to_owned())
         .spawn(move || {
-            let result = build_report(tab, &usage);
+            let result = build_report(tab);
             let _delivered = events.send(WorkerEvent::Report { tab, result });
         })
         .map(|_handle| ())
@@ -218,7 +216,7 @@ fn borrowed(result: &Result<String, String>) -> Result<&str, &str> {
     result.as_ref().map(String::as_str).map_err(String::as_str)
 }
 
-fn build_report(tab: Tab, usage: &[ProcessUsage]) -> Result<Report, String> {
+fn build_report(tab: Tab) -> Result<Report, String> {
     match tab {
         Tab::Connections => collect_connections()
             .map(|report| connections_report(&report))
@@ -240,11 +238,96 @@ fn build_report(tab: Tab, usage: &[ProcessUsage]) -> Result<Report, String> {
             Ok(logs_report(borrowed(&errors), borrowed(&warnings)))
         }
         Tab::Gpu => Ok(gpu_report(&collect_gpus())),
-        Tab::Containers => Ok(containers_report(&list_containers(), usage)),
-        Tab::Processes | Tab::Services | Tab::Pacman | Tab::Io => {
+        Tab::Processes | Tab::Services | Tab::Pacman | Tab::Io | Tab::Containers => {
             Err(format!("{} has no on-demand report", tab.label()))
         }
     }
+}
+
+/// Lists the containers of every installed runtime on its own thread.
+///
+/// # Arguments
+///
+/// * `events` - where the list is sent
+/// * `usage` - the running processes, to total up per container
+///
+/// # Errors
+///
+/// Returns the OS error if the thread cannot be created.
+pub fn spawn_containers(events: Sender<WorkerEvent>, usage: Vec<ProcessUsage>) -> io::Result<()> {
+    thread::Builder::new()
+        .name("borbatop-containers".to_owned())
+        .spawn(move || {
+            let view = containers_view(&list_containers(), &usage);
+            let _delivered = events.send(WorkerEvent::Containers(Ok(Box::new(view))));
+        })
+        .map(|_handle| ())
+}
+
+/// Acts on one container on its own thread, then lists the containers again so the screen shows
+/// the new state.
+///
+/// # Arguments
+///
+/// * `events` - where the outcome and the new list are sent
+/// * `runtime` - runtime that owns the container
+/// * `container` - identifier of the container
+/// * `action` - what to do with it
+/// * `usage` - the running processes, to total up per container
+///
+/// # Errors
+///
+/// Returns the OS error if the thread cannot be created.
+pub fn spawn_container_action(
+    events: Sender<WorkerEvent>,
+    runtime: String,
+    container: String,
+    action: ContainerAction,
+    usage: Vec<ProcessUsage>,
+) -> io::Result<()> {
+    thread::Builder::new()
+        .name("borbatop-container".to_owned())
+        .spawn(move || {
+            let verb = action.verb();
+            let outcome = control_container(&runtime, &container, action)
+                .map(|()| format!("{verb} {container}: done"))
+                .map_err(|error| format!("{verb} {container} failed: {error}"));
+            let _delivered = events.send(WorkerEvent::Outcome(outcome));
+            let view = containers_view(&list_containers(), &usage);
+            let _delivered = events.send(WorkerEvent::Containers(Ok(Box::new(view))));
+        })
+        .map(|_handle| ())
+}
+
+/// Reads the latest log lines of a container on its own thread.
+///
+/// # Arguments
+///
+/// * `events` - where the text is sent
+/// * `runtime` - runtime that owns the container
+/// * `container` - identifier of the container
+/// * `name` - container name, for the overlay title
+///
+/// # Errors
+///
+/// Returns the OS error if the thread cannot be created.
+pub fn spawn_container_logs(
+    events: Sender<WorkerEvent>,
+    runtime: String,
+    container: String,
+    name: String,
+) -> io::Result<()> {
+    thread::Builder::new()
+        .name("borbatop-container-logs".to_owned())
+        .spawn(move || {
+            let result = container_logs(&runtime, &container, CONTAINER_LOG_LINES)
+                .map_err(|error| error.to_string());
+            let _delivered = events.send(WorkerEvent::Overlay {
+                title: format!("CONTAINER LOGS · {name}"),
+                result,
+            });
+        })
+        .map(|_handle| ())
 }
 
 /// Runs a start, stop or restart on its own thread: `systemctl` can take seconds.
@@ -312,6 +395,7 @@ mod tests {
                 | WorkerEvent::Logs { .. }
                 | WorkerEvent::Outcome(_)
                 | WorkerEvent::Overlay { .. }
+                | WorkerEvent::Containers(_)
                 | WorkerEvent::Report { .. } => panic!("unexpected event"),
             }
         }
@@ -340,10 +424,10 @@ mod tests {
     #[test]
     fn every_on_demand_tab_builds_a_report_on_this_machine() {
         for tab in Tab::ALL.into_iter().filter(|tab| tab.is_report()) {
-            let report = build_report(tab, &[]).unwrap();
+            let report = build_report(tab).unwrap();
             assert!(!report.lines.is_empty(), "{} is empty", tab.label());
         }
-        assert!(build_report(Tab::Processes, &[]).is_err());
+        assert!(build_report(Tab::Processes).is_err());
     }
 
     #[test]
@@ -367,6 +451,7 @@ mod tests {
             | WorkerEvent::Pacman(_)
             | WorkerEvent::Logs { .. }
             | WorkerEvent::Outcome(_)
+            | WorkerEvent::Containers(_)
             | WorkerEvent::Report { .. } => panic!("unexpected event"),
         }
     }
@@ -385,6 +470,7 @@ mod tests {
             | WorkerEvent::Pacman(_)
             | WorkerEvent::Logs { .. }
             | WorkerEvent::Overlay { .. }
+            | WorkerEvent::Containers(_)
             | WorkerEvent::Report { .. } => panic!("unexpected event"),
         }
     }
@@ -403,6 +489,7 @@ mod tests {
             | WorkerEvent::Pacman(_)
             | WorkerEvent::Outcome(_)
             | WorkerEvent::Overlay { .. }
+            | WorkerEvent::Containers(_)
             | WorkerEvent::Report { .. } => panic!("unexpected event"),
         }
     }

@@ -9,7 +9,9 @@ use borbatop_core::{ActiveState, Pid, ProcessId, UnitRow, order_as_tree};
 use crate::alerts::{Alert, AlertThresholds, evaluate};
 use crate::dialog::{Dialog, DialogOutcome};
 use crate::input::{Command, ExportContent, ExportOrder, ExportRequest, Key, Seek, SortKey, Tab};
-use crate::model::{Model, PacmanView, ProcessRow, Report, ReportLine, ReportTone};
+use crate::model::{
+    ContainerView, ContainersView, Model, PacmanView, ProcessRow, Report, ReportLine, ReportTone,
+};
 use crate::mouse::{HitMap, Mouse};
 use crate::theme::ThemeKind;
 use crate::widgets::safe;
@@ -183,6 +185,10 @@ pub struct App {
     pub(crate) alerts: Vec<Alert>,
     pub(crate) pacman: PacmanState,
     pub(crate) reports: HashMap<Tab, Fetch<Report>>,
+    /// The Containers tab; `None` until it was first opened.
+    pub(crate) containers: Option<Fetch<ContainersView>>,
+    /// `(runtime, id)` of the selected container.
+    pub(crate) selected_container: Option<(String, String)>,
     pub(crate) scroll: usize,
     /// Largest useful scroll offset, learned while drawing.
     pub(crate) max_scroll: Cell<usize>,
@@ -231,6 +237,8 @@ impl App {
             alerts: Vec::new(),
             pacman: PacmanState::NotRequested,
             reports: HashMap::new(),
+            containers: None,
+            selected_container: None,
             scroll: 0,
             max_scroll: Cell::new(0),
             hits: RefCell::new(HitMap::default()),
@@ -347,6 +355,26 @@ impl App {
         self.reports.insert(tab, Fetch::Loaded(report));
     }
 
+    /// Stores the freshly listed containers, or why they could not be listed.
+    ///
+    /// # Arguments
+    ///
+    /// * `result` - the containers, or the failure message
+    pub fn set_containers(&mut self, result: Result<ContainersView, String>) {
+        let view = result.unwrap_or_else(|reason| ContainersView {
+            problems: vec![reason],
+            ..ContainersView::default()
+        });
+        self.containers = Some(Fetch::Loaded(view));
+        self.ensure_container_selection();
+    }
+
+    /// Whether the container list is being built.
+    #[must_use]
+    pub fn is_containers_loading(&self) -> bool {
+        matches!(self.containers, Some(Fetch::Loading))
+    }
+
     /// Shows a message in the status bar for a few ticks.
     ///
     /// # Arguments
@@ -426,6 +454,52 @@ impl App {
         if !still_listed {
             self.selected_unit = units.first().map(|unit| unit.name().to_owned());
         }
+        self.ensure_container_selection();
+    }
+
+    /// The containers that are listed, in display order.
+    pub(crate) fn listed_containers(&self) -> &[ContainerView] {
+        match &self.containers {
+            Some(Fetch::Loaded(view)) => &view.containers,
+            Some(Fetch::Loading) | None => &[],
+        }
+    }
+
+    fn container_key(container: &ContainerView) -> (String, String) {
+        (container.runtime.clone(), container.id.clone())
+    }
+
+    /// Keeps a container selected whenever there is one to select.
+    fn ensure_container_selection(&mut self) {
+        let containers = self.listed_containers();
+        let still_listed = containers
+            .iter()
+            .any(|container| Some(Self::container_key(container)) == self.selected_container);
+        if !still_listed {
+            self.selected_container = containers.first().map(Self::container_key);
+        }
+    }
+
+    fn selected_container_view(&self) -> Option<&ContainerView> {
+        if self.tab != Tab::Containers {
+            return None;
+        }
+        self.listed_containers()
+            .iter()
+            .find(|container| Some(Self::container_key(container)) == self.selected_container)
+    }
+
+    fn move_container_selection(&mut self, delta: isize) {
+        let containers = self.listed_containers();
+        let Some(last) = containers.len().checked_sub(1) else {
+            return;
+        };
+        let current = containers
+            .iter()
+            .position(|container| Some(Self::container_key(container)) == self.selected_container)
+            .unwrap_or(0);
+        let target = current.saturating_add_signed(delta).min(last);
+        self.selected_container = containers.get(target).map(Self::container_key);
     }
 
     fn dispatch_key(&mut self, key: Key) -> Option<Command> {
@@ -562,13 +636,16 @@ impl App {
                     self.selected_unit = name;
                 }
             }
-            Tab::Pacman
-            | Tab::Io
-            | Tab::Connections
-            | Tab::Boot
-            | Tab::Logs
-            | Tab::Gpu
-            | Tab::Containers => {}
+            Tab::Containers => {
+                let key = self
+                    .listed_containers()
+                    .get(position)
+                    .map(Self::container_key);
+                if key.is_some() {
+                    self.selected_container = key;
+                }
+            }
+            Tab::Pacman | Tab::Io | Tab::Connections | Tab::Boot | Tab::Logs | Tab::Gpu => {}
         }
     }
 
@@ -649,6 +726,9 @@ impl App {
         if tab.is_report() && !self.reports.contains_key(&tab) {
             return self.request_report(tab);
         }
+        if tab == Tab::Containers && self.containers.is_none() {
+            return self.request_containers();
+        }
         None
     }
 
@@ -656,9 +736,19 @@ impl App {
     fn request_reload(&mut self) -> Option<Command> {
         if self.tab.is_report() {
             self.request_report(self.tab)
+        } else if self.tab == Tab::Containers {
+            self.request_containers()
         } else {
             self.request_pacman()
         }
+    }
+
+    fn request_containers(&mut self) -> Option<Command> {
+        if self.is_containers_loading() {
+            return None;
+        }
+        self.containers = Some(Fetch::Loading);
+        Some(Command::LoadContainers)
     }
 
     fn request_report(&mut self, tab: Tab) -> Option<Command> {
@@ -709,7 +799,11 @@ impl App {
                     return self.not_ready_to_export();
                 }
             },
-            Tab::Connections | Tab::Boot | Tab::Logs | Tab::Gpu | Tab::Containers => {
+            Tab::Containers => match &self.containers {
+                Some(Fetch::Loaded(view)) => ExportContent::Containers(Box::new(view.clone())),
+                Some(Fetch::Loading) | None => return self.not_ready_to_export(),
+            },
+            Tab::Connections | Tab::Boot | Tab::Logs | Tab::Gpu => {
                 match self.reports.get(&self.tab) {
                     Some(Fetch::Loaded(report)) => ExportContent::Report(report.clone()),
                     Some(Fetch::Loading) | None => return self.not_ready_to_export(),
@@ -753,12 +847,27 @@ impl App {
     }
 
     fn request_logs(&mut self) -> Option<Command> {
-        if self.tab != Tab::Services {
-            return None;
+        match self.tab {
+            Tab::Services => self
+                .selected_unit
+                .clone()
+                .map(|unit| Command::LoadLogs { unit }),
+            Tab::Containers => {
+                self.selected_container_view()
+                    .map(|container| Command::LoadContainerLogs {
+                        runtime: container.runtime.clone(),
+                        id: container.id.clone(),
+                        name: container.name.clone(),
+                    })
+            }
+            Tab::Processes
+            | Tab::Pacman
+            | Tab::Io
+            | Tab::Connections
+            | Tab::Boot
+            | Tab::Logs
+            | Tab::Gpu => None,
         }
-        self.selected_unit
-            .clone()
-            .map(|unit| Command::LoadLogs { unit })
     }
 
     /// The selected process, when the Processes tab is showing.
@@ -798,6 +907,15 @@ impl App {
     }
 
     fn open_service_dialog(&mut self) -> Option<Command> {
+        if self.tab == Tab::Containers {
+            let container = self.selected_container_view()?;
+            self.dialog = Some(Dialog::container(
+                &container.runtime,
+                &container.id,
+                &container.name,
+            ));
+            return None;
+        }
         if self.tab != Tab::Services {
             return None;
         }
@@ -866,13 +984,8 @@ impl App {
         match self.tab {
             Tab::Processes => self.move_process_selection(delta),
             Tab::Services => self.move_service_selection(delta),
-            Tab::Pacman
-            | Tab::Io
-            | Tab::Connections
-            | Tab::Boot
-            | Tab::Logs
-            | Tab::Gpu
-            | Tab::Containers => {
+            Tab::Containers => self.move_container_selection(delta),
+            Tab::Pacman | Tab::Io | Tab::Connections | Tab::Boot | Tab::Logs | Tab::Gpu => {
                 self.scroll = self
                     .scroll
                     .saturating_add_signed(delta)
@@ -1141,6 +1254,9 @@ mod tests {
                 | Command::ControlUnit { .. }
                 | Command::LoadDetail { .. }
                 | Command::LoadReport(_)
+                | Command::LoadContainers
+                | Command::ControlContainer { .. }
+                | Command::LoadContainerLogs { .. }
                 | Command::RefreshPacman
                 | Command::LoadLogs { .. } => None,
             })
@@ -1237,6 +1353,138 @@ mod tests {
             request.content,
             ExportContent::Services(vec!["z.service".to_owned(), "b.service".to_owned()]),
             "failed units first, as on screen"
+        );
+    }
+
+    fn container(runtime: &str, id: &str, name: &str, running: bool) -> ContainerView {
+        ContainerView {
+            runtime: runtime.to_owned(),
+            id: id.to_owned(),
+            name: name.to_owned(),
+            image: "nginx".to_owned(),
+            status: if running { "Up 3 hours" } else { "Exited (0)" }.to_owned(),
+            running,
+            usage: "3 processes · cpu 0.4% · mem 54.0M".to_owned(),
+        }
+    }
+
+    fn loaded_containers() -> App {
+        let mut app = app_with(vec![]);
+        assert_eq!(
+            app.handle_key(Key::Char('9')),
+            Some(Command::LoadContainers)
+        );
+        app.set_containers(Ok(ContainersView {
+            containers: vec![
+                container("podman", "aaa111", "web", true),
+                container("docker", "bbb222", "db", false),
+            ],
+            has_runtime: true,
+            ..ContainersView::default()
+        }));
+        app
+    }
+
+    #[test]
+    fn the_containers_tab_loads_once_selects_and_acts_on_the_chosen_container() {
+        let mut app = loaded_containers();
+        assert!(!app.is_containers_loading());
+        assert_eq!(app.handle_key(Key::Char('1')), None);
+        assert_eq!(
+            app.handle_key(Key::Char('9')),
+            None,
+            "a loaded list is kept"
+        );
+        assert_eq!(
+            app.selected_container,
+            Some(("podman".to_owned(), "aaa111".to_owned()))
+        );
+
+        app.handle_key(Key::Down);
+        assert_eq!(
+            app.selected_container,
+            Some(("docker".to_owned(), "bbb222".to_owned()))
+        );
+
+        assert_eq!(
+            app.handle_key(Key::Char('l')),
+            Some(Command::LoadContainerLogs {
+                runtime: "docker".to_owned(),
+                id: "bbb222".to_owned(),
+                name: "db".to_owned(),
+            })
+        );
+
+        assert_eq!(app.handle_key(Key::Char('a')), None);
+        assert!(app.dialog.is_some());
+        app.handle_key(Key::Down); // stop
+        app.handle_key(Key::Down); // start
+        assert_eq!(
+            app.handle_key(Key::Enter),
+            Some(Command::ControlContainer {
+                runtime: "docker".to_owned(),
+                id: "bbb222".to_owned(),
+                action: crate::input::ContainerChoice::Start,
+            })
+        );
+    }
+
+    #[test]
+    fn container_selection_survives_a_refresh_and_falls_back_when_it_disappears() {
+        let mut app = loaded_containers();
+        app.handle_key(Key::Down);
+        app.set_containers(Ok(ContainersView {
+            containers: vec![
+                container("podman", "aaa111", "web", true),
+                container("docker", "bbb222", "db", true),
+            ],
+            has_runtime: true,
+            ..ContainersView::default()
+        }));
+        assert_eq!(
+            app.selected_container,
+            Some(("docker".to_owned(), "bbb222".to_owned()))
+        );
+
+        app.set_containers(Ok(ContainersView {
+            containers: vec![container("podman", "aaa111", "web", true)],
+            has_runtime: true,
+            ..ContainersView::default()
+        }));
+        assert_eq!(
+            app.selected_container,
+            Some(("podman".to_owned(), "aaa111".to_owned()))
+        );
+
+        assert_eq!(
+            app.handle_key(Key::Char('R')),
+            Some(Command::LoadContainers)
+        );
+        assert_eq!(app.handle_key(Key::Char('R')), None, "already loading");
+    }
+
+    #[test]
+    fn a_runtime_that_failed_is_shown_as_a_problem_and_nothing_is_selectable() {
+        let mut app = app_with(vec![]);
+        app.handle_key(Key::Char('9'));
+        app.set_containers(Err("docker: permission denied".to_owned()));
+        assert_eq!(app.selected_container, None);
+        assert_eq!(app.handle_key(Key::Char('a')), None);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.handle_key(Key::Char('l')), None);
+    }
+
+    #[test]
+    fn export_of_the_containers_tab_waits_for_the_list() {
+        let mut app = app_with(vec![]);
+        app.handle_key(Key::Char('9'));
+        assert_eq!(app.handle_key(Key::Char('e')), None, "still loading");
+
+        let mut loaded = loaded_containers();
+        let request = exported(&mut loaded);
+        assert_eq!(request.tab, Tab::Containers);
+        assert!(
+            matches!(request.content, ExportContent::Containers(ref view) if view.containers.len() == 2)
         );
     }
 

@@ -1,7 +1,9 @@
 //! Translation between the data sources' types and the screen's types.
 
-use borbatop_sources::{KernelStatus, PacmanReport, Reading, Signal, UnitAction};
-use borbatop_tui::{AurView, KernelView, PacmanView, ServiceAction, SignalChoice, StaleView};
+use borbatop_sources::{ContainerAction, KernelStatus, PacmanReport, Reading, Signal, UnitAction};
+use borbatop_tui::{
+    AurView, ContainerChoice, KernelView, PacmanView, ServiceAction, SignalChoice, StaleView,
+};
 
 /// The screen's view of a Pacman report; every failed part keeps its own message.
 ///
@@ -91,9 +93,33 @@ pub const fn unit_action_of(action: ServiceAction) -> UnitAction {
     }
 }
 
+/// The data sources' container action for a choice made in the container dialog.
+///
+/// # Arguments
+///
+/// * `choice` - action picked on screen
+#[must_use]
+pub const fn container_action_of(choice: ContainerChoice) -> ContainerAction {
+    match choice {
+        ContainerChoice::Restart => ContainerAction::Restart,
+        ContainerChoice::Stop => ContainerAction::Stop,
+        ContainerChoice::Start => ContainerAction::Start,
+        ContainerChoice::Remove => ContainerAction::Remove,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_container_choice_maps_to_the_matching_verb() {
+        let verbs: Vec<&str> = ContainerChoice::ALL
+            .iter()
+            .map(|choice| container_action_of(*choice).verb())
+            .collect();
+        assert_eq!(verbs, ["restart", "stop", "start", "rm"]);
+    }
 
     #[test]
     fn every_service_choice_maps_to_the_matching_verb() {
