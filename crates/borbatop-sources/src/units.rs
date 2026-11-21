@@ -63,6 +63,56 @@ pub fn unit_logs(unit: &str, lines: u16) -> Result<String, CommandError> {
     )
 }
 
+/// What can be done to a unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnitAction {
+    /// `systemctl restart`.
+    Restart,
+    /// `systemctl stop`.
+    Stop,
+    /// `systemctl start`.
+    Start,
+}
+
+impl UnitAction {
+    /// The `systemctl` verb.
+    #[must_use]
+    pub const fn verb(self) -> &'static str {
+        match self {
+            Self::Restart => "restart",
+            Self::Stop => "stop",
+            Self::Start => "start",
+        }
+    }
+}
+
+/// Starts, stops or restarts a unit.
+///
+/// `systemctl` runs with `--no-ask-password`: a terminal program cannot answer a polkit prompt,
+/// so an unprivileged call fails at once with the reason instead of hanging.
+///
+/// # Arguments
+///
+/// * `unit` - unit name as `systemctl` printed it
+/// * `action` - what to do with it
+///
+/// # Errors
+///
+/// * [`CommandError::InvalidUnitName`] when `unit` has characters no unit name can have.
+/// * [`CommandError::Spawn`] / [`CommandError::Failed`] when `systemctl` cannot run or refuses
+///   (for example, authentication is required).
+pub fn control_unit(unit: &str, action: UnitAction) -> Result<(), CommandError> {
+    if !is_valid_unit_name(unit) {
+        return Err(CommandError::InvalidUnitName(unit.to_owned()));
+    }
+    run(
+        "systemctl",
+        &["--no-ask-password", "--no-pager", action.verb(), unit],
+        &[],
+    )
+    .map(|_output| ())
+}
+
 fn is_valid_unit_name(unit: &str) -> bool {
     !unit.is_empty()
         && unit.chars().count() <= MAX_UNIT_NAME_CHARS
@@ -101,6 +151,31 @@ mod tests {
     fn invalid_name_never_reaches_the_shell() {
         let error = unit_logs("-n 1", 10).unwrap_err();
         assert!(matches!(error, CommandError::InvalidUnitName(_)));
+    }
+
+    #[test]
+    fn verbs_match_systemctl() {
+        assert_eq!(UnitAction::Restart.verb(), "restart");
+        assert_eq!(UnitAction::Stop.verb(), "stop");
+        assert_eq!(UnitAction::Start.verb(), "start");
+    }
+
+    #[test]
+    fn invalid_name_is_refused_before_systemctl_runs() {
+        for action in [UnitAction::Restart, UnitAction::Stop, UnitAction::Start] {
+            let error = control_unit("--now", action).unwrap_err();
+            assert!(matches!(error, CommandError::InvalidUnitName(_)));
+        }
+    }
+
+    #[test]
+    fn unprivileged_control_of_a_system_unit_fails_instead_of_hanging() {
+        if !std::path::Path::new("/run/systemd/system").exists() {
+            return; // not booted with systemd (container, chroot)
+        }
+        // Stopping a nonexistent unit fails for everyone, privileged or not.
+        let result = control_unit("borbatop-no-such-unit.service", UnitAction::Stop);
+        assert!(matches!(result, Err(CommandError::Failed { .. })));
     }
 
     #[test]

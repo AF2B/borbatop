@@ -1,7 +1,7 @@
 //! Translation between the data sources' types and the screen's types.
 
-use borbatop_sources::{KernelStatus, PacmanReport, Reading, Signal};
-use borbatop_tui::{KernelView, PacmanView, SignalChoice, StaleView};
+use borbatop_sources::{KernelStatus, PacmanReport, Reading, Signal, UnitAction};
+use borbatop_tui::{KernelView, PacmanView, ServiceAction, SignalChoice, StaleView};
 
 /// The screen's view of a Pacman report; every failed part keeps its own message.
 ///
@@ -71,9 +71,30 @@ pub const fn signal_of(choice: SignalChoice) -> Signal {
     }
 }
 
+/// The data sources' unit action for a choice made in the service dialog.
+///
+/// # Arguments
+///
+/// * `action` - action picked on screen
+#[must_use]
+pub const fn unit_action_of(action: ServiceAction) -> UnitAction {
+    match action {
+        ServiceAction::Restart => UnitAction::Restart,
+        ServiceAction::Stop => UnitAction::Stop,
+        ServiceAction::Start => UnitAction::Start,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_service_choice_maps_to_the_matching_verb() {
+        for action in ServiceAction::ALL {
+            assert_eq!(unit_action_of(action).verb(), action.name());
+        }
+    }
 
     #[test]
     fn every_dialog_choice_maps_to_the_matching_signal() {

@@ -177,6 +177,10 @@ fn process_json(process: &ProcessRow, commands: CommandLines) -> Json {
             Json::Unsigned(process.memory.get()),
         ),
         (
+            "nice".to_owned(),
+            Json::Signed(i64::from(process.nice.get())),
+        ),
+        (
             "threads".to_owned(),
             Json::Unsigned(u64::from(process.threads.get())),
         ),
@@ -295,6 +299,7 @@ mod tests {
             state: ProcessState::Sleeping,
             cpu: Permille::new(250),
             memory: Bytes::new(4_096),
+            nice: sample.nice(),
             threads: sample.threads(),
             unit: "app.scope".to_owned(),
             package: "pkg".to_owned(),

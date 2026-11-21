@@ -1,6 +1,6 @@
 //! What the person can press, and what the screen asks the program to do about it.
 
-use borbatop_core::ProcessId;
+use borbatop_core::{Nice, ProcessId};
 
 /// A key press, independent of any terminal library.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +165,42 @@ impl SignalChoice {
     }
 }
 
+/// An action offered for a systemd unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceAction {
+    /// Stop and start the unit again.
+    Restart,
+    /// Stop the unit.
+    Stop,
+    /// Start the unit.
+    Start,
+}
+
+impl ServiceAction {
+    /// Actions in the order the dialog lists them.
+    pub const ALL: [Self; 3] = [Self::Restart, Self::Stop, Self::Start];
+
+    /// Action name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Restart => "restart",
+            Self::Stop => "stop",
+            Self::Start => "start",
+        }
+    }
+
+    /// What the action does, in one phrase.
+    #[must_use]
+    pub const fn effect(self) -> &'static str {
+        match self {
+            Self::Restart => "stop, then start again",
+            Self::Stop => "stop it now",
+            Self::Start => "start it now",
+        }
+    }
+}
+
 /// What the screen asks the program to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -176,6 +212,27 @@ pub enum Command {
         id: ProcessId,
         /// Signal to send.
         signal: SignalChoice,
+    },
+    /// Change the niceness of a process.
+    SetNice {
+        /// Process to change: PID plus start time.
+        id: ProcessId,
+        /// New niceness.
+        nice: Nice,
+    },
+    /// Restrict a process to some CPUs.
+    SetAffinity {
+        /// Process to change: PID plus start time.
+        id: ProcessId,
+        /// Indices of the CPUs the process may use; never empty.
+        cpus: Vec<usize>,
+    },
+    /// Start, stop or restart a unit.
+    ControlUnit {
+        /// Unit to act on.
+        unit: String,
+        /// What to do.
+        action: ServiceAction,
     },
     /// Rebuild the Pacman report.
     RefreshPacman,

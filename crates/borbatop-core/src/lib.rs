@@ -31,7 +31,7 @@ pub use memory::{
     parse_loadavg, parse_meminfo, parse_millicelsius, parse_pressure, parse_uptime,
 };
 pub use process::{
-    Pages, Pid, ProcessId, ProcessSample, ProcessState, StartTime, StatField, StatParseError,
+    Nice, Pages, Pid, ProcessId, ProcessSample, ProcessState, StartTime, StatField, StatParseError,
     ThreadCount, UnknownStateCode, parse_process_stat,
 };
 pub use services::{

@@ -161,6 +161,7 @@ impl ModelBuilder {
                         .page_size
                         .bytes_in(sample.resident_pages())
                         .unwrap_or_default(),
+                    nice: sample.nice(),
                     threads: sample.threads(),
                     unit: statics.unit().to_owned(),
                     package: statics.package().to_owned(),

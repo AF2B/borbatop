@@ -2,17 +2,15 @@
 
 use std::error::Error;
 use std::fmt;
-use std::fs;
 use std::io;
 
-use borbatop_core::{Pid, ProcessId, parse_process_stat};
+use borbatop_core::{Pid, ProcessId};
 use rustix::io::Errno;
 use rustix::process::{
     Pid as RawPid, PidfdFlags, Signal as RawSignal, pidfd_open, pidfd_send_signal,
 };
 
-const PROC_ROOT: &str = "/proc";
-const STAT_FILE: &str = "stat";
+use crate::identity::{IdentityError, current_identity};
 
 /// The signals a task manager offers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,25 +113,14 @@ pub fn send_signal(id: ProcessId, signal: Signal) -> Result<(), SignalError> {
         .ok_or(SignalError::InvalidPid(pid))?;
 
     let pidfd = pidfd_open(raw_pid, PidfdFlags::empty()).map_err(from_errno)?;
-    if current_identity(pid)? != id {
+    let holder = current_identity(pid).map_err(|error| match error {
+        IdentityError::Gone => SignalError::NoSuchProcess,
+        IdentityError::Unreadable(source) => SignalError::Os(source),
+    })?;
+    if holder != id {
         return Err(SignalError::NoSuchProcess);
     }
     pidfd_send_signal(&pidfd, signal.raw()).map_err(from_errno)
-}
-
-/// Identity of whatever process currently holds `pid`.
-fn current_identity(pid: Pid) -> Result<ProcessId, SignalError> {
-    let path = format!("{PROC_ROOT}/{pid}/{STAT_FILE}");
-    let bytes = fs::read(&path).map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            SignalError::NoSuchProcess
-        } else {
-            SignalError::Os(error)
-        }
-    })?;
-    parse_process_stat(&String::from_utf8_lossy(&bytes))
-        .map(|sample| sample.id())
-        .map_err(|error| SignalError::Os(io::Error::new(io::ErrorKind::InvalidData, error)))
 }
 
 #[cfg(test)]

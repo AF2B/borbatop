@@ -21,6 +21,7 @@ const STATE_INDEX: usize = 0;
 const PARENT_PID_INDEX: usize = 1;
 const USER_TIME_INDEX: usize = 11;
 const SYSTEM_TIME_INDEX: usize = 12;
+const NICE_INDEX: usize = 16;
 const THREADS_INDEX: usize = 17;
 const START_TIME_INDEX: usize = 19;
 const RESIDENT_PAGES_INDEX: usize = 21;
@@ -112,6 +113,45 @@ impl ProcessId {
     #[must_use]
     pub const fn start_time(self) -> StartTime {
         self.start_time
+    }
+}
+
+/// Scheduling niceness: -20 (most favored) to 19 (least favored).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Nice(i8);
+
+impl Nice {
+    /// Most favored niceness the kernel accepts.
+    pub const MIN: i8 = -20;
+    /// Least favored niceness the kernel accepts.
+    pub const MAX: i8 = 19;
+
+    /// Wraps a niceness, clamping it into the range the kernel accepts.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - requested niceness
+    #[must_use]
+    pub const fn clamped(raw: i8) -> Self {
+        if raw < Self::MIN {
+            Self(Self::MIN)
+        } else if raw > Self::MAX {
+            Self(Self::MAX)
+        } else {
+            Self(raw)
+        }
+    }
+
+    /// The raw niceness.
+    #[must_use]
+    pub const fn get(self) -> i8 {
+        self.0
+    }
+}
+
+impl fmt::Display for Nice {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
     }
 }
 
@@ -239,6 +279,8 @@ pub enum StatField {
     UserTime,
     /// Time spent in kernel mode.
     SystemTime,
+    /// Scheduling niceness.
+    Nice,
     /// Number of threads.
     Threads,
     /// Moment the process started, after boot.
@@ -255,6 +297,7 @@ impl fmt::Display for StatField {
             Self::ParentPid => "ppid",
             Self::UserTime => "utime",
             Self::SystemTime => "stime",
+            Self::Nice => "nice",
             Self::Threads => "num_threads",
             Self::StartTime => "starttime",
             Self::ResidentPages => "rss",
@@ -303,6 +346,7 @@ pub struct ProcessSample {
     comm: String,
     state: ProcessState,
     cpu_ticks: CpuTicks,
+    nice: Nice,
     threads: ThreadCount,
     resident_pages: Pages,
 }
@@ -316,6 +360,7 @@ impl fmt::Debug for ProcessSample {
             .field("comm", &REDACTED_COMM)
             .field("state", &self.state)
             .field("cpu_ticks", &self.cpu_ticks)
+            .field("nice", &self.nice)
             .field("threads", &self.threads)
             .field("resident_pages", &self.resident_pages)
             .finish()
@@ -360,6 +405,12 @@ impl ProcessSample {
     #[must_use]
     pub const fn cpu_ticks(&self) -> CpuTicks {
         self.cpu_ticks
+    }
+
+    /// Scheduling niceness.
+    #[must_use]
+    pub const fn nice(&self) -> Nice {
+        self.nice
     }
 
     /// Number of threads in the process.
@@ -421,6 +472,7 @@ pub fn parse_process_stat(line: &str) -> Result<ProcessSample, StatParseError> {
     let mut parent: Option<u32> = None;
     let mut user_time: Option<u64> = None;
     let mut system_time: Option<u64> = None;
+    let mut nice: Option<i8> = None;
     let mut threads: Option<u32> = None;
     let mut start_time: Option<u64> = None;
     let mut resident_pages: Option<i64> = None;
@@ -431,6 +483,7 @@ pub fn parse_process_stat(line: &str) -> Result<ProcessSample, StatParseError> {
             PARENT_PID_INDEX => parent = Some(parse_number(token, StatField::ParentPid)?),
             USER_TIME_INDEX => user_time = Some(parse_number(token, StatField::UserTime)?),
             SYSTEM_TIME_INDEX => system_time = Some(parse_number(token, StatField::SystemTime)?),
+            NICE_INDEX => nice = Some(parse_number(token, StatField::Nice)?),
             THREADS_INDEX => threads = Some(parse_number(token, StatField::Threads)?),
             START_TIME_INDEX => start_time = Some(parse_number(token, StatField::StartTime)?),
             RESIDENT_PAGES_INDEX => {
@@ -461,6 +514,7 @@ pub fn parse_process_stat(line: &str) -> Result<ProcessSample, StatParseError> {
         comm: comm.to_owned(),
         state: state.ok_or(StatParseError::MissingField(StatField::State))?,
         cpu_ticks: CpuTicks(cpu_ticks),
+        nice: Nice::clamped(nice.ok_or(StatParseError::MissingField(StatField::Nice))?),
         threads: ThreadCount(threads.ok_or(StatParseError::MissingField(StatField::Threads))?),
         resident_pages: Pages(resident.max(0).unsigned_abs()),
     })
@@ -554,6 +608,20 @@ mod tests {
         let printed = format!("{sample:?}");
         assert!(!printed.contains("secret-name"));
         assert!(printed.contains(REDACTED_COMM));
+    }
+
+    #[test]
+    fn nice_is_read_from_the_stat_line_and_clamped() {
+        let line =
+            |nice: &str| format!("10 (x) S 0 1 1 0 -1 0 0 0 0 0 7 3 0 0 20 {nice} 2 0 1 100 50 0");
+        assert_eq!(parse_process_stat(&line("-20")).unwrap().nice().get(), -20);
+        assert_eq!(parse_process_stat(&line("19")).unwrap().nice().get(), 19);
+        assert_eq!(Nice::clamped(100).get(), Nice::MAX);
+        assert_eq!(Nice::clamped(-100).get(), Nice::MIN);
+        assert_eq!(
+            parse_process_stat(&line("x")),
+            Err(StatParseError::InvalidNumber(StatField::Nice))
+        );
     }
 
     #[test]

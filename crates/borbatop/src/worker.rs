@@ -7,7 +7,9 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread;
 
 use borbatop_core::Pid;
-use borbatop_sources::{SystemCollector, collect_pacman_report, list_units, unit_logs};
+use borbatop_sources::{
+    SystemCollector, UnitAction, collect_pacman_report, control_unit, list_units, unit_logs,
+};
 use borbatop_tui::{Model, PacmanView};
 
 use crate::config::Settings;
@@ -33,6 +35,8 @@ pub enum WorkerEvent {
         /// Journal text, or the failure message.
         result: Result<String, String>,
     },
+    /// The outcome of an action: a confirmation, or why it failed.
+    Outcome(Result<String, String>),
 }
 
 /// Keeps the sampler running; dropping it asks the thread to stop.
@@ -138,6 +142,34 @@ pub fn spawn_logs(events: Sender<WorkerEvent>, unit: String) -> io::Result<()> {
         .map(|_handle| ())
 }
 
+/// Runs a start, stop or restart on its own thread: `systemctl` can take seconds.
+///
+/// # Arguments
+///
+/// * `events` - where the outcome is sent
+/// * `unit` - unit to act on
+/// * `action` - what to do with it
+///
+/// # Errors
+///
+/// Returns the OS error if the thread cannot be created.
+pub fn spawn_unit_action(
+    events: Sender<WorkerEvent>,
+    unit: String,
+    action: UnitAction,
+) -> io::Result<()> {
+    thread::Builder::new()
+        .name("borbatop-systemctl".to_owned())
+        .spawn(move || {
+            let verb = action.verb();
+            let outcome = control_unit(&unit, action)
+                .map(|()| format!("{verb} {unit}: done"))
+                .map_err(|error| format!("{verb} {unit} failed: {error}"));
+            let _delivered = events.send(WorkerEvent::Outcome(outcome));
+        })
+        .map(|_handle| ())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -169,7 +201,9 @@ mod tests {
             match received.recv_timeout(PATIENCE).unwrap() {
                 WorkerEvent::Model(model) => assert_ne!(model.processes.len(), 0),
                 WorkerEvent::Failure(reason) => panic!("sampler failed: {reason}"),
-                WorkerEvent::Pacman(_) | WorkerEvent::Logs { .. } => panic!("unexpected event"),
+                WorkerEvent::Pacman(_) | WorkerEvent::Logs { .. } | WorkerEvent::Outcome(_) => {
+                    panic!("unexpected event")
+                }
             }
         }
         drop(handle);
@@ -195,6 +229,22 @@ mod tests {
     }
 
     #[test]
+    fn an_invalid_unit_name_is_reported_as_a_failed_outcome() {
+        let (events, received) = channel();
+        spawn_unit_action(events, "--bad".to_owned(), UnitAction::Stop).unwrap();
+        match received.recv_timeout(PATIENCE).unwrap() {
+            WorkerEvent::Outcome(result) => {
+                let message = result.unwrap_err();
+                assert!(message.contains("stop --bad failed"), "{message}");
+            }
+            WorkerEvent::Model(_)
+            | WorkerEvent::Failure(_)
+            | WorkerEvent::Pacman(_)
+            | WorkerEvent::Logs { .. } => panic!("unexpected event"),
+        }
+    }
+
+    #[test]
     fn journal_of_an_invalid_unit_comes_back_as_a_failure_message() {
         let (events, received) = channel();
         spawn_logs(events, "--bad".to_owned()).unwrap();
@@ -203,9 +253,10 @@ mod tests {
                 assert_eq!(unit, "--bad");
                 assert!(result.unwrap_err().contains("invalid unit name"));
             }
-            WorkerEvent::Model(_) | WorkerEvent::Failure(_) | WorkerEvent::Pacman(_) => {
-                panic!("unexpected event")
-            }
+            WorkerEvent::Model(_)
+            | WorkerEvent::Failure(_)
+            | WorkerEvent::Pacman(_)
+            | WorkerEvent::Outcome(_) => panic!("unexpected event"),
         }
     }
 }

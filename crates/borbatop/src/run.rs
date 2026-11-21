@@ -4,8 +4,8 @@ use std::io;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
-use borbatop_core::ProcessId;
-use borbatop_sources::send_signal;
+use borbatop_core::{Nice, ProcessId};
+use borbatop_sources::{ScheduleError, send_signal, set_affinity, set_nice};
 use borbatop_tui::{
     App, Command, MessageKind, SignalChoice, UiConfig, draw, is_interrupt, key_from_event,
 };
@@ -13,8 +13,8 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event};
 
 use crate::config::Settings;
-use crate::convert::signal_of;
-use crate::worker::{WorkerEvent, spawn_logs, spawn_pacman, spawn_sampler};
+use crate::convert::{signal_of, unit_action_of};
+use crate::worker::{WorkerEvent, spawn_logs, spawn_pacman, spawn_sampler, spawn_unit_action};
 
 const INPUT_POLL: Duration = Duration::from_millis(100);
 
@@ -88,6 +88,8 @@ fn apply(update: WorkerEvent, app: &mut App) {
         WorkerEvent::Failure(reason) => app.notify(reason, MessageKind::Error),
         WorkerEvent::Pacman(view) => app.set_pacman(*view),
         WorkerEvent::Logs { unit, result } => app.set_logs(unit, result),
+        WorkerEvent::Outcome(Ok(text)) => app.notify(text, MessageKind::Info),
+        WorkerEvent::Outcome(Err(text)) => app.notify(text, MessageKind::Error),
     }
 }
 
@@ -96,6 +98,16 @@ fn execute(command: Command, app: &mut App, events: &Sender<WorkerEvent>) -> boo
     match command {
         Command::Quit => return false,
         Command::SendSignal { id, signal } => deliver(app, id, signal),
+        Command::SetNice { id, nice } => renice(app, id, nice),
+        Command::SetAffinity { id, cpus } => pin(app, id, &cpus),
+        Command::ControlUnit { unit, action } => {
+            if let Err(error) = spawn_unit_action(events.clone(), unit, unit_action_of(action)) {
+                app.notify(
+                    format!("cannot start systemctl: {error}"),
+                    MessageKind::Error,
+                );
+            }
+        }
         Command::RefreshPacman => {
             let processes = app
                 .model()
@@ -133,6 +145,33 @@ fn deliver(app: &mut App, id: ProcessId, choice: SignalChoice) {
             format!("{} to PID {pid} failed: {error}", choice.name()),
             MessageKind::Error,
         ),
+    }
+}
+
+fn renice(app: &mut App, id: ProcessId, nice: Nice) {
+    let pid = id.pid();
+    report_schedule(
+        app,
+        set_nice(id, nice),
+        &format!("PID {pid} nice set to {nice}"),
+        &format!("renice PID {pid} failed"),
+    );
+}
+
+fn pin(app: &mut App, id: ProcessId, cpus: &[usize]) {
+    let pid = id.pid();
+    report_schedule(
+        app,
+        set_affinity(id, cpus),
+        &format!("PID {pid} pinned to {} CPU(s)", cpus.len()),
+        &format!("pinning PID {pid} failed"),
+    );
+}
+
+fn report_schedule(app: &mut App, result: Result<(), ScheduleError>, done: &str, failed: &str) {
+    match result {
+        Ok(()) => app.notify(done, MessageKind::Info),
+        Err(error) => app.notify(format!("{failed}: {error}"), MessageKind::Error),
     }
 }
 

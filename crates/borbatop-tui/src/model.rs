@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use borbatop_core::{
-    Bytes, BytesPerSecond, History, LoadAvg, MemInfo, MilliCelsius, Permille, Pid, Pressure,
+    Bytes, BytesPerSecond, History, LoadAvg, MemInfo, MilliCelsius, Nice, Permille, Pid, Pressure,
     ProcessState, StartTime, ThreadCount, UnitList, Upgrade,
 };
 
@@ -26,6 +26,8 @@ pub struct ProcessRow {
     pub cpu: Permille,
     /// Resident memory.
     pub memory: Bytes,
+    /// Scheduling niceness.
+    pub nice: Nice,
     /// Number of threads.
     pub threads: ThreadCount,
     /// Systemd unit that runs the process.
@@ -47,6 +49,7 @@ impl std::fmt::Debug for ProcessRow {
             .field("state", &self.state)
             .field("cpu", &self.cpu)
             .field("memory", &self.memory)
+            .field("nice", &self.nice)
             .field("threads", &self.threads)
             .field("unit", &self.unit)
             .field("package", &self.package)

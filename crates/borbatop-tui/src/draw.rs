@@ -8,10 +8,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use crate::app::{
-    App, InputMode, LogView, MessageKind, PacmanState, ProcessLayout, SignalDialog, Visibility,
-    VisibleRow,
+    App, InputMode, LogView, MessageKind, PacmanState, ProcessLayout, Visibility, VisibleRow,
 };
-use crate::input::{SignalChoice, SortKey, Tab};
+use crate::dialog::{Dialog, Tone};
+use crate::input::{SortKey, Tab};
 use crate::model::{Model, PacmanView, ProcessRow};
 use crate::theme::Theme;
 use crate::widgets::{Heat, bar_text, fit, fit_right, heat_of, safe, scale_of, sparkline};
@@ -24,8 +24,7 @@ const MAX_CORE_ROWS: usize = 8;
 const MIN_TOP_HEIGHT: u16 = 6;
 const BORDER_ROWS: u16 = 2;
 const CPU_PANEL_PERCENT: u16 = 55;
-const DIALOG_WIDTH: u16 = 46;
-const DIALOG_HEIGHT: u16 = 9;
+const DIALOG_WIDTH: u16 = 62;
 const NARROW_WIDTH: usize = 100;
 const WIDE_WIDTH: usize = 120;
 const NOT_AVAILABLE: &str = "n/a";
@@ -49,7 +48,6 @@ const MOUNT_WIDTH: usize = 16;
 const FS_TYPE_WIDTH: usize = 6;
 const INTERFACE_WIDTH: usize = 12;
 const RATE_WIDTH: usize = 10;
-const DIALOG_RESERVED: usize = 12;
 const HEADER_INFO_WIDTH: u16 = 48;
 const JOURNAL_MARGIN_X: u16 = 4;
 const JOURNAL_MARGIN_Y: u16 = 2;
@@ -884,6 +882,8 @@ fn hints_for(tab: Tab) -> &'static [(&'static str, &'static str)] {
             ("/", "filter"),
             ("t", "tree"),
             ("K", "signal"),
+            ("n", "nice"),
+            ("c", "cpus"),
             ("p", "pkg"),
             ("␣", "pause"),
             ("q", "quit"),
@@ -892,6 +892,7 @@ fn hints_for(tab: Tab) -> &'static [(&'static str, &'static str)] {
             ("↑↓", "move"),
             ("/", "filter"),
             ("l", "logs"),
+            ("a", "action"),
             ("␣", "pause"),
             ("q", "quit"),
         ],
@@ -949,42 +950,43 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-fn draw_dialog(frame: &mut Frame, dialog: &SignalDialog, styles: &Styles) {
-    let area = centered(frame.area(), DIALOG_WIDTH, DIALOG_HEIGHT);
+fn tone_style(tone: Tone, styles: &Styles) -> Style {
+    match tone {
+        Tone::Plain => styles.base,
+        Tone::Secondary => styles.secondary,
+        Tone::Selected => styles.selected,
+        Tone::Danger => styles.danger,
+        Tone::DangerSelected => styles.danger.add_modifier(Modifier::REVERSED),
+    }
+}
+
+fn draw_dialog(frame: &mut Frame, dialog: &Dialog, styles: &Styles) {
+    let body_width = DIALOG_WIDTH.saturating_sub(BORDER_ROWS);
+    let view = dialog.view(usize::from(body_width));
+    let height = u16::try_from(view.lines.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(BORDER_ROWS);
+    let area = centered(frame.area(), DIALOG_WIDTH, height);
     frame.render_widget(Clear, area);
     let block = Block::bordered()
         .border_style(styles.strong)
         .style(styles.base)
-        .title(Span::styled(" SEND SIGNAL ", styles.accent));
+        .title(Span::styled(format!(" {} ", view.title), styles.accent));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let target = fit(
-        &dialog.command,
-        usize::from(inner.width).saturating_sub(DIALOG_RESERVED),
-    );
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(target, styles.base),
-            Span::styled(format!(" PID {}", dialog.id.pid()), styles.secondary),
-        ]),
-        Line::raw(""),
-    ];
-    for (position, choice) in SignalChoice::ALL.iter().enumerate() {
-        let text = format!(" {:<8} {} ", choice.name(), choice.effect());
-        let style = match (position == dialog.selected, *choice == SignalChoice::Kill) {
-            (true, true) => styles.danger.add_modifier(Modifier::REVERSED),
-            (true, false) => styles.selected,
-            (false, true) => styles.danger,
-            (false, false) => styles.base,
-        };
-        lines.push(Line::styled(text, style));
-    }
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "↑↓ choose · Enter send · Esc cancel",
-        styles.secondary,
-    ));
+    let lines: Vec<Line> = view
+        .lines
+        .iter()
+        .map(|line| {
+            Line::from(
+                line.runs
+                    .iter()
+                    .map(|(text, tone)| Span::styled(text.clone(), tone_style(*tone, styles)))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
     frame.render_widget(Paragraph::new(lines).style(styles.base), inner);
 }
 
@@ -1049,6 +1051,7 @@ mod tests {
             state: ProcessState::Running,
             cpu: Permille::new(cpu),
             memory: Bytes::new(cpu.saturating_mul(1_000_000)),
+            nice: sample.nice(),
             threads: sample.threads(),
             unit: "app-kitty.scope".to_owned(),
             package: "kitty".to_owned(),
@@ -1281,6 +1284,39 @@ mod tests {
         app.handle_key(Key::Char('K'));
         let text = screen(&app);
         for expected in ["SEND SIGNAL", "SIGTERM", "SIGKILL", "end now, no cleanup"] {
+            assert!(text.contains(expected), "missing {expected:?}");
+        }
+    }
+
+    #[test]
+    fn nice_and_affinity_dialogs_overlay_the_screen() {
+        let mut app = app();
+        app.handle_key(Key::Down);
+        app.handle_key(Key::Char('n'));
+        let text = screen(&app);
+        for expected in ["RENICE", "current", "always allowed"] {
+            assert!(text.contains(expected), "missing {expected:?}");
+        }
+        app.handle_key(Key::Escape);
+
+        let mut model = app.model().clone();
+        model.cores = vec![Permille::new(0); 8];
+        app.apply_model(model);
+        app.handle_key(Key::Char('c'));
+        let text = screen(&app);
+        for expected in ["CPU AFFINITY", "[x]0", "[x]7", "Space toggle"] {
+            assert!(text.contains(expected), "missing {expected:?}");
+        }
+    }
+
+    #[test]
+    fn service_dialog_overlays_the_services_tab() {
+        let mut app = app();
+        app.handle_key(Key::Char('2'));
+        app.handle_key(Key::Down);
+        app.handle_key(Key::Char('a'));
+        let text = screen(&app);
+        for expected in ["SERVICE", "restart", "stop it now"] {
             assert!(text.contains(expected), "missing {expected:?}");
         }
     }

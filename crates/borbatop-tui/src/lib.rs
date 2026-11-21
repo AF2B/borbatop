@@ -4,6 +4,7 @@
 //! [`Command`]s and is drawn by [`draw`]. Only [`key_from_event`] touches terminal types.
 
 mod app;
+mod dialog;
 mod draw;
 mod input;
 mod model;
@@ -13,7 +14,7 @@ mod widgets;
 
 pub use app::{App, MessageKind, UiConfig};
 pub use draw::{WORDMARK, draw};
-pub use input::{Command, Key, SignalChoice, SortKey, Tab};
+pub use input::{Command, Key, ServiceAction, SignalChoice, SortKey, Tab};
 pub use model::{
     DiskRow, KernelView, Model, MountRow, NetRow, PacmanView, PressureView, ProcessRow, StaleView,
 };

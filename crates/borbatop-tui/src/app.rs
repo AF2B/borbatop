@@ -6,7 +6,8 @@ use std::collections::HashSet;
 
 use borbatop_core::{ActiveState, Pid, ProcessId, UnitRow, order_as_tree};
 
-use crate::input::{Command, Key, SignalChoice, SortKey, Tab};
+use crate::dialog::{Dialog, DialogOutcome};
+use crate::input::{Command, Key, SortKey, Tab};
 use crate::model::{Model, PacmanView, ProcessRow};
 use crate::theme::ThemeKind;
 use crate::widgets::safe;
@@ -102,13 +103,6 @@ pub(crate) struct Message {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SignalDialog {
-    pub(crate) id: ProcessId,
-    pub(crate) command: String,
-    pub(crate) selected: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LogView {
     pub(crate) unit: String,
     pub(crate) lines: Vec<String>,
@@ -149,7 +143,7 @@ pub struct App {
     pub(crate) filter: String,
     pub(crate) input: InputMode,
     pub(crate) playback: Playback,
-    pub(crate) dialog: Option<SignalDialog>,
+    pub(crate) dialog: Option<Dialog>,
     pub(crate) logs: Option<LogView>,
     pub(crate) message: Option<Message>,
     pub(crate) pacman: PacmanState,
@@ -388,6 +382,9 @@ impl App {
                 None
             }
             'K' => self.open_signal_dialog(),
+            'n' => self.open_nice_dialog(),
+            'c' => self.open_affinity_dialog(),
+            'a' => self.open_service_dialog(),
             'R' => self.request_pacman(),
             'l' => self.request_logs(),
             digit => {
@@ -429,40 +426,64 @@ impl App {
             .map(|unit| Command::LoadLogs { unit })
     }
 
-    fn open_signal_dialog(&mut self) -> Option<Command> {
+    /// The selected process, when the Processes tab is showing.
+    fn selected_process(&self) -> Option<&ProcessRow> {
         if self.tab != Tab::Processes {
             return None;
         }
-        let process = self
-            .model
+        self.model
             .processes
             .iter()
-            .find(|process| Some(process.pid) == self.selected_pid)?;
-        self.dialog = Some(SignalDialog {
-            id: ProcessId::new(process.pid, process.start_time),
-            command: process.command.clone(),
-            selected: 0,
-        });
+            .find(|process| Some(process.pid) == self.selected_pid)
+    }
+
+    fn open_signal_dialog(&mut self) -> Option<Command> {
+        let process = self.selected_process()?;
+        let id = ProcessId::new(process.pid, process.start_time);
+        self.dialog = Some(Dialog::signal(id, &process.command));
+        None
+    }
+
+    fn open_nice_dialog(&mut self) -> Option<Command> {
+        let process = self.selected_process()?;
+        let id = ProcessId::new(process.pid, process.start_time);
+        self.dialog = Some(Dialog::nice(id, &process.command, process.nice));
+        None
+    }
+
+    fn open_affinity_dialog(&mut self) -> Option<Command> {
+        let cpu_count = self.model.cores.len();
+        let process = self.selected_process()?;
+        if cpu_count == 0 {
+            return None;
+        }
+        let id = ProcessId::new(process.pid, process.start_time);
+        self.dialog = Some(Dialog::affinity(id, &process.command, cpu_count));
+        None
+    }
+
+    fn open_service_dialog(&mut self) -> Option<Command> {
+        if self.tab != Tab::Services {
+            return None;
+        }
+        let unit = self.selected_unit.as_deref()?;
+        self.dialog = Some(Dialog::service(unit));
         None
     }
 
     fn handle_dialog_key(&mut self, key: Key) -> Option<Command> {
         let dialog = self.dialog.as_mut()?;
-        let last = SignalChoice::ALL.len().saturating_sub(1);
-        match nav_of(key) {
-            Some(Nav::Up) => dialog.selected = dialog.selected.saturating_sub(1),
-            Some(Nav::Down) => dialog.selected = dialog.selected.saturating_add(1).min(last),
-            Some(Nav::PageUp | Nav::PageDown | Nav::Top | Nav::Bottom) | None => {}
+        match dialog.handle_key(key) {
+            DialogOutcome::Open => None,
+            DialogOutcome::Closed => {
+                self.dialog = None;
+                None
+            }
+            DialogOutcome::Confirmed(command) => {
+                self.dialog = None;
+                Some(command)
+            }
         }
-        if key == Key::Escape || key == Key::Char('q') {
-            self.dialog = None;
-        } else if key == Key::Enter {
-            let id = dialog.id;
-            let choice = SignalChoice::ALL.get(dialog.selected).copied();
-            self.dialog = None;
-            return choice.map(|signal| Command::SendSignal { id, signal });
-        }
-        None
     }
 
     fn handle_logs_key(&mut self, key: Key) {
@@ -662,6 +683,8 @@ fn matches_filter(process: &ProcessRow, needle: &str) -> bool {
 mod tests {
     use borbatop_core::{Bytes, Permille, ProcessState, parse_systemctl_units};
 
+    use crate::input::SignalChoice;
+
     use super::*;
 
     fn row(pid: u32, parent: u32, cpu: u64, command: &str) -> ProcessRow {
@@ -675,6 +698,7 @@ mod tests {
             state: ProcessState::Sleeping,
             cpu: Permille::new(cpu),
             memory: Bytes::new(cpu.saturating_mul(10)),
+            nice: sample.nice(),
             threads: sample.threads(),
             unit: "app.scope".to_owned(),
             package: "pkg".to_owned(),
@@ -824,6 +848,71 @@ mod tests {
         app.handle_key(Key::Char('2'));
         app.handle_key(Key::Char('K'));
         assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn nice_dialog_opens_at_the_current_value_and_confirms() {
+        let mut app = app_with(vec![row(7, 0, 5, "victim")]);
+        app.handle_key(Key::Down);
+        assert_eq!(app.handle_key(Key::Char('n')), None);
+        assert!(app.dialog.is_some());
+
+        app.handle_key(Key::PageDown);
+        let command = app.handle_key(Key::Enter);
+
+        assert_eq!(
+            command,
+            Some(Command::SetNice {
+                id: ProcessId::new(Pid::new(7), borbatop_core::StartTime::new(1)),
+                nice: borbatop_core::Nice::clamped(5),
+            })
+        );
+        assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn affinity_dialog_needs_cores_and_returns_the_selection() {
+        let mut app = app_with(vec![row(7, 0, 5, "victim")]);
+        app.handle_key(Key::Char('c'));
+        assert!(app.dialog.is_none(), "no cores known yet");
+
+        let mut model = app.model.clone();
+        model.cores = vec![Permille::new(0); 4];
+        app.apply_model(model);
+        app.handle_key(Key::Char('c'));
+        assert!(app.dialog.is_some());
+
+        app.handle_key(Key::Char(' ')); // drop CPU 0
+        let command = app.handle_key(Key::Enter);
+        assert_eq!(
+            command,
+            Some(Command::SetAffinity {
+                id: ProcessId::new(Pid::new(7), borbatop_core::StartTime::new(1)),
+                cpus: vec![1, 2, 3],
+            })
+        );
+    }
+
+    #[test]
+    fn service_dialog_opens_only_on_the_services_tab() {
+        let mut app = app_with(vec![row(7, 0, 5, "victim")]);
+        let mut model = Model::empty(4);
+        model.services = Ok(parse_systemctl_units("a.service loaded active running A\n"));
+        app.apply_model(model);
+
+        app.handle_key(Key::Char('a'));
+        assert!(app.dialog.is_none(), "processes tab ignores 'a'");
+
+        app.handle_key(Key::Char('2'));
+        app.handle_key(Key::Char('a'));
+        assert!(app.dialog.is_some());
+        assert_eq!(
+            app.handle_key(Key::Enter),
+            Some(Command::ControlUnit {
+                unit: "a.service".to_owned(),
+                action: crate::input::ServiceAction::Restart,
+            })
+        );
     }
 
     #[test]
