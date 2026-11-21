@@ -188,6 +188,23 @@ impl ProcessState {
     }
 }
 
+impl ProcessState {
+    /// The single character the kernel uses for this state.
+    #[must_use]
+    pub const fn code(self) -> char {
+        match self {
+            Self::Running => RUNNING_CODE,
+            Self::Sleeping => SLEEPING_CODE,
+            Self::DiskSleep => DISK_SLEEP_CODE,
+            Self::Zombie => ZOMBIE_CODE,
+            Self::Stopped => STOPPED_CODE,
+            Self::TracingStop => TRACING_STOP_CODE,
+            Self::Dead => DEAD_CODE,
+            Self::Idle => IDLE_CODE,
+        }
+    }
+}
+
 /// A field of `/proc/[pid]/stat` that the parser reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatField {
@@ -455,6 +472,16 @@ mod tests {
         assert_eq!(ProcessState::from_code('R'), Ok(ProcessState::Running));
         assert_eq!(ProcessState::from_code('I'), Ok(ProcessState::Idle));
         assert_eq!(ProcessState::from_code('t'), Ok(ProcessState::TracingStop));
+    }
+
+    #[test]
+    fn code_is_the_inverse_of_from_code() {
+        for code in ['R', 'S', 'D', 'Z', 'T', 't', 'X', 'I'] {
+            assert_eq!(
+                ProcessState::from_code(code).map(ProcessState::code),
+                Ok(code)
+            );
+        }
     }
 
     #[test]

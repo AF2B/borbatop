@@ -7,6 +7,8 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+borbatop-core.workspace = true
+ratatui = "0.30.2"
 
 [lints]
 workspace = true
