@@ -12,7 +12,7 @@ One screen for processes, systemd services, pacman, sockets, boot time, the syst
 |---|---|
 | Processes | CPU, memory, threads, owner, systemd unit, owning package, full command line. Sort, filter, tree view, signals, renice (priority), CPU affinity. `Enter` opens everything known about the process: files, sockets, limits, memory. |
 | Services | systemd units with failures first, the journal of the selected unit, start / stop / restart. |
-| Pacman | Pending upgrades (fresh with `checkupdates`, otherwise from the local database), AUR upgrades for every `yay` or `paru` installed, orphans, running versus installed kernel, leftover `.pacnew` files, processes using replaced libraries. `u` chooses what to update. |
+| Pacman | Pending upgrades (fresh with `checkupdates`, otherwise from the local database), AUR upgrades for every `yay` or `paru` installed, orphans, running versus installed kernel, leftover `.pacnew` files, processes using replaced libraries. `u` chooses what to update; `D` opens the Update Doctor. |
 | Network · Disk | Throughput per interface and disk, fill level of each filesystem. |
 | Connections | Every TCP and UDP socket with the process that owns it. |
 | Boot | `systemd-analyze` summary and the slowest units. |
@@ -69,6 +69,8 @@ borbatop replay trace.jsonl               # look at it on screen; Space pauses, 
 | `a` | restart, stop or start the selected service; start, stop, restart or remove the selected container |
 | `l` | journal of the selected service, or logs of the selected container |
 | `u` | Pacman tab: choose what to update (repositories, AUR helpers) |
+| `D` | Pacman tab: Update Doctor, what to know before and after updating |
+| `s` / `d` / `p` / `x` | Pacman tab: take a snapshot / diff the `.pacnew` files / merge them with `pacdiff` / restart the services that use a replaced library |
 | `e` | export the tab being shown to a JSON file |
 | `R` | rebuild the report of the current tab |
 | `Space` | pause |
@@ -91,6 +93,14 @@ Typical use: give a heavy job (a build, a backup) `nice 10` or more so the rest 
 
 `u` on the Pacman tab lists what can be updated: the official repositories as **one** full upgrade (`sudo pacman -Syu`, never one package at a time, because a single-package upgrade leaves Arch half-upgraded), and for each installed AUR helper (`yay`, `paru`) either everything or a package choice. The command then runs on your real terminal, so `sudo` asks for the password there and borbatop never sees it; when it ends, press Enter to come back and the report refreshes.
 
+### Update Doctor
+
+`D` on the Pacman tab writes up what to know **before** you update: the Arch news published since your last full upgrade (an announcement that needs a manual step is marked with `!`), free space on `/` and in the package cache, whether `snapper` or `timeshift` is installed, and what is pending. It also lists what to do **afterwards**: reboot when a newer kernel is installed, the services that still run with a replaced library, and the `.pacnew` files to review.
+
+From there: `s` takes a snapshot, `u` offers "snapshot, then update repositories" (the upgrade runs only if the snapshot worked), `x` restarts the affected services, `d` shows what changed in each `.pacnew` and `p` merges them with `pacdiff`. All of these run on your real terminal, so `sudo` asks for the password there. Rollback is never automatic: restore a snapshot yourself with `snapper rollback` or `timeshift --restore`.
+
+The news comes from `archlinux.org` through `curl` (10-second limit); offline, the Doctor says so and still reports everything else.
+
 ### Configuration
 
 `~/.config/borbatop/config.toml` (or `$XDG_CONFIG_HOME/borbatop/config.toml`); see `packaging/config.example.toml`. Every key is optional, unknown keys are rejected, and command-line flags win over the file. The `[alerts]` table sets the level at which each reading raises an alert.
@@ -99,7 +109,7 @@ Typical use: give a heavy job (a build, a backup) `nice 10` or more so the rest 
 
 - Linux with cgroup v2 and `pidfd` support (kernel 5.3 or newer).
 - A terminal; truecolor is recommended, `--theme ansi` works without it.
-- Optional: `systemd` for the Services and Boot tabs, `pacman` for the Pacman tab and package names, `pacman-contrib` (`checkupdates`) for a fresh upgrade list, `yay` or `paru` for AUR upgrades, `nvidia-smi` for NVIDIA readings, `podman` or `docker` for the Containers tab.
+- Optional: `curl` for the Arch news, `snapper` or `timeshift` for snapshots, `pacman-contrib` (`pacdiff`) to merge `.pacnew` files, `systemd` for the Services and Boot tabs, `pacman` for the Pacman tab and package names, `pacman-contrib` (`checkupdates`) for a fresh upgrade list, `yay` or `paru` for AUR upgrades, `nvidia-smi` for NVIDIA readings, `podman` or `docker` for the Containers tab.
 - Starting and stopping services needs privileges: `systemctl` runs without asking for a password, so an unprivileged attempt fails with the reason. Raising a process's priority needs root; lowering it never does.
 
 ## Privacy and safety
