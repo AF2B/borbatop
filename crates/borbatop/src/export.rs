@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -73,22 +73,8 @@ pub fn write_export(
     let text = export_json(request, model, &moment).render();
 
     for attempt in 0..NAME_ATTEMPTS {
-        let suffix = if attempt == 0 {
-            String::new()
-        } else {
-            format!("-{attempt}")
-        };
-        let path = directory.join(format!(
-            "borbatop-{}-{}{suffix}.json",
-            request.tab.slug(),
-            moment.file_stamp()
-        ));
-        let opened = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(FILE_MODE)
-            .open(&path);
-        match opened {
+        let path = export_path(directory, request, &moment, attempt);
+        match create_private_file(&path) {
             Ok(mut file) => {
                 writeln!(file, "{text}").map_err(|source| ExportError {
                     path: path.clone(),
@@ -107,6 +93,34 @@ pub fn write_export(
             "too many exports in one second",
         ),
     })
+}
+
+/// `borbatop-<tab>-<stamp>.json`, with `-<attempt>` added after the first try.
+fn export_path(
+    directory: &Path,
+    request: &ExportRequest,
+    moment: &UtcDateTime,
+    attempt: u32,
+) -> PathBuf {
+    let suffix = if attempt == 0 {
+        String::new()
+    } else {
+        format!("-{attempt}")
+    };
+    directory.join(format!(
+        "borbatop-{}-{}{suffix}.json",
+        request.tab.slug(),
+        moment.file_stamp()
+    ))
+}
+
+/// A new file readable by its owner only; fails when the name is taken.
+fn create_private_file(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(FILE_MODE)
+        .open(path)
 }
 
 /// The JSON document of one export.

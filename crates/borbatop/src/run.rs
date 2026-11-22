@@ -1,12 +1,14 @@
 //! The interactive loop: terminal setup, events, commands, and teardown.
 
 use std::io::{self, BufRead};
-use std::process::Command as Program;
+use std::process::{Command as Program, ExitStatus};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant, SystemTime};
 
 use borbatop_core::{Nice, Pid, ProcessId};
-use borbatop_sources::{ScheduleError, send_signal, set_affinity, set_nice, update_command};
+use borbatop_sources::{
+    ScheduleError, UpdateCommand, send_signal, set_affinity, set_nice, update_command,
+};
 use borbatop_tui::{
     App, Command, ExportRequest, Key, MessageKind, Model, Seek, SignalChoice, UiConfig, UpdatePlan,
     draw, is_interrupt, key_from_event, mouse_from_event,
@@ -159,45 +161,47 @@ fn event_loop(
         terminal.draw(|frame| draw(frame, &app))?;
 
         if event::poll(INPUT_POLL)? {
-            let command = match event::read()? {
-                Event::Key(key) => {
-                    if is_interrupt(&key) {
-                        return Ok(());
+            let event = event::read()?;
+            if let Some(command) = command_from(&event, &mut app) {
+                if let Command::RunUpdate(plan) = &command {
+                    if replay.is_some() {
+                        app.notify(
+                            "this is a recording: nothing here can be acted on",
+                            MessageKind::Error,
+                        );
+                    } else {
+                        update_on_terminal(terminal, &mut app, (events, received), plan, mouse)?;
                     }
-                    key_from_event(key).and_then(|key| app.handle_key(key))
+                } else if !dispatch(command, &mut app, events, replay.as_mut()) {
+                    return Ok(());
                 }
-                Event::Mouse(mouse) => {
-                    mouse_from_event(mouse).and_then(|mouse| app.handle_mouse(mouse))
-                }
-                Event::FocusGained | Event::FocusLost | Event::Paste(_) | Event::Resize(_, _) => {
-                    None
-                }
-            };
-            match command {
-                Some(Command::RunUpdate(_)) if replay.is_some() => {
-                    app.notify(
-                        "this is a recording: nothing here can be acted on",
-                        MessageKind::Error,
-                    );
-                }
-                Some(Command::RunUpdate(plan)) => {
-                    update_on_terminal(terminal, &mut app, (events, received), &plan, mouse)?;
-                }
-                Some(command) => {
-                    if !dispatch(command, &mut app, events, replay.as_mut()) {
-                        return Ok(());
-                    }
-                }
-                None => {}
             }
         }
+        continue_after_input(replay.as_mut(), &mut app, received);
+    }
+}
 
-        if let Some(replay) = replay.as_mut() {
-            replay.tick(&mut app);
-        }
-        while let Ok(update) = received.try_recv() {
-            apply(update, &mut app);
-        }
+/// What a terminal event asks the program to do, if anything. Ctrl+C quits at once.
+fn command_from(event: &Event, app: &mut App) -> Option<Command> {
+    match event {
+        Event::Key(key) if is_interrupt(key) => Some(Command::Quit),
+        Event::Key(key) => key_from_event(*key).and_then(|key| app.handle_key(key)),
+        Event::Mouse(mouse) => mouse_from_event(*mouse).and_then(|mouse| app.handle_mouse(mouse)),
+        Event::FocusGained | Event::FocusLost | Event::Paste(_) | Event::Resize(_, _) => None,
+    }
+}
+
+/// Between inputs: advance a replay when due and show what the workers sent meanwhile.
+fn continue_after_input(
+    replay: Option<&mut Replay>,
+    app: &mut App,
+    received: &Receiver<WorkerEvent>,
+) {
+    if let Some(replay) = replay {
+        replay.tick(app);
+    }
+    while let Ok(update) = received.try_recv() {
+        apply(update, app);
     }
 }
 
@@ -264,53 +268,74 @@ fn execute(command: Command, app: &mut App, events: &Sender<WorkerEvent>) -> boo
         Command::SendSignal { id, signal } => deliver(app, id, signal),
         Command::SetNice { id, nice } => renice(app, id, nice),
         Command::SetAffinity { id, cpus } => pin(app, id, &cpus),
-        Command::ControlUnit { unit, action } => {
-            let started = spawn_unit_action(events.clone(), unit, unit_action_of(action));
-            report_start(app, "start systemctl", started);
-        }
         Command::Export(request) => export(app, &request),
-        Command::LoadContainers => {
-            let started = spawn_containers(events.clone(), usage_of(app.model()));
-            report_start(app, "list the containers", started);
-        }
+        Command::ControlUnit { .. }
+        | Command::LoadLogs { .. }
+        | Command::LoadDetail { .. }
+        | Command::LoadReport(_)
+        | Command::RefreshPacman
+        | Command::LoadContainers
+        | Command::ControlContainer { .. }
+        | Command::LoadContainerLogs { .. } => spawn_background(command, app, events),
+    }
+    true
+}
+
+/// Starts the worker thread that carries out a slow command and reports back by event.
+fn spawn_background(command: Command, app: &mut App, events: &Sender<WorkerEvent>) {
+    let (what, started) = match command {
+        Command::ControlUnit { unit, action } => (
+            "start systemctl".to_owned(),
+            spawn_unit_action(events.clone(), unit, unit_action_of(action)),
+        ),
+        Command::LoadLogs { unit } => (
+            "start journalctl".to_owned(),
+            spawn_logs(events.clone(), unit),
+        ),
+        Command::LoadDetail { id, label } => (
+            "read process details".to_owned(),
+            spawn_detail(events.clone(), id, label),
+        ),
+        Command::LoadReport(tab) => (
+            format!("build the {} report", tab.label()),
+            spawn_report(events.clone(), tab),
+        ),
+        Command::RefreshPacman => (
+            "start the pacman report".to_owned(),
+            spawn_pacman(events.clone(), pacman_inputs(app.model())),
+        ),
+        Command::LoadContainers => (
+            "list the containers".to_owned(),
+            spawn_containers(events.clone(), usage_of(app.model())),
+        ),
         Command::ControlContainer {
             runtime,
             id,
             action,
-        } => {
-            let started = spawn_container_action(
+        } => (
+            "run the container command".to_owned(),
+            spawn_container_action(
                 events.clone(),
                 runtime,
                 id,
                 container_action_of(action),
                 usage_of(app.model()),
-            );
-            report_start(app, "run the container command", started);
-        }
-        Command::LoadContainerLogs { runtime, id, name } => {
-            let started = spawn_container_logs(events.clone(), runtime, id, name);
-            report_start(app, "read the container logs", started);
-        }
-        Command::LoadDetail { id, label } => {
-            report_start(
-                app,
-                "read process details",
-                spawn_detail(events.clone(), id, label),
-            );
-        }
-        Command::LoadReport(tab) => {
-            let started = spawn_report(events.clone(), tab);
-            report_start(app, &format!("build the {} report", tab.label()), started);
-        }
-        Command::RefreshPacman => {
-            let started = spawn_pacman(events.clone(), pacman_inputs(app.model()));
-            report_start(app, "start the pacman report", started);
-        }
-        Command::LoadLogs { unit } => {
-            report_start(app, "start journalctl", spawn_logs(events.clone(), unit));
-        }
-    }
-    true
+            ),
+        ),
+        Command::LoadContainerLogs { runtime, id, name } => (
+            "read the container logs".to_owned(),
+            spawn_container_logs(events.clone(), runtime, id, name),
+        ),
+        // The other commands never reach this function.
+        Command::Quit
+        | Command::Seek(_)
+        | Command::SendSignal { .. }
+        | Command::SetNice { .. }
+        | Command::SetAffinity { .. }
+        | Command::Export(_)
+        | Command::RunUpdate(_) => return,
+    };
+    report_start(app, &what, started);
 }
 
 /// Runs an update on the real terminal: the screen steps aside, the command talks to the person
@@ -332,14 +357,7 @@ fn update_on_terminal(
 
     capture_mouse_release(mouse)?;
     ratatui::restore();
-    println!("\nborbatop: running `{command}`\n");
-    let status = Program::new(command.program())
-        .args(command.arguments())
-        .status();
-    println!("\nborbatop: press Enter to return to the screen.");
-    // Any answer, or none at all (input closed), brings the screen back.
-    let _answer = io::stdin().lock().lines().next();
-
+    let status = run_on_terminal(&command);
     *terminal = ratatui::try_init()?;
     capture_mouse(mouse)?;
 
@@ -348,6 +366,34 @@ fn update_on_terminal(
     while let Ok(update) = received.try_recv() {
         apply(update, app);
     }
+    report_update(app, &command, status);
+    if let Some(refresh) = app.handle_key(Key::Char('R')) {
+        execute(refresh, app, events);
+    }
+    Ok(())
+}
+
+/// Runs the command with the terminal's own input and output, then waits for Enter so the person
+/// can read what it printed.
+fn run_on_terminal(command: &UpdateCommand) -> io::Result<ExitStatus> {
+    println!(
+        "
+borbatop: running `{command}`
+"
+    );
+    let status = Program::new(command.program())
+        .args(command.arguments())
+        .status();
+    println!(
+        "
+borbatop: press Enter to return to the screen."
+    );
+    // Any answer, or none at all (input closed), brings the screen back.
+    let _answer = io::stdin().lock().lines().next();
+    status
+}
+
+fn report_update(app: &mut App, command: &UpdateCommand, status: io::Result<ExitStatus>) {
     match status {
         Ok(status) if status.success() => {
             app.notify(format!("`{command}` finished"), MessageKind::Info);
@@ -361,10 +407,6 @@ fn update_on_terminal(
             MessageKind::Error,
         ),
     }
-    if let Some(refresh) = app.handle_key(Key::Char('R')) {
-        execute(refresh, app, events);
-    }
-    Ok(())
 }
 
 /// Writes the tab being shown to a JSON file in the current directory and says where it went.
