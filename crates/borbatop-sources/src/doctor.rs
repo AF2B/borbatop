@@ -204,12 +204,12 @@ fn measure(path: &'static str) -> Reading<Headroom> {
 ///
 /// # Errors
 ///
-/// * [`CommandError::InvalidContainer`] when the path is not a `.pacnew` under `/etc` (no `..`
+/// * [`CommandError::InvalidConfigFile`] when the path is not a `.pacnew` under `/etc` (no `..`
 ///   either), so nothing else can be read through this function.
 /// * [`CommandError::Spawn`] / [`CommandError::Failed`] when `diff` cannot run.
 pub fn pacnew_diff(pacnew: &str) -> Result<String, CommandError> {
-    let original =
-        pacnew_original(pacnew).ok_or_else(|| CommandError::InvalidContainer(pacnew.to_owned()))?;
+    let original = pacnew_original(pacnew)
+        .ok_or_else(|| CommandError::InvalidConfigFile(pacnew.to_owned()))?;
     run(
         "diff",
         &["--unified", "--", original, pacnew],
@@ -316,7 +316,7 @@ mod tests {
         }
         assert!(matches!(
             pacnew_diff("/etc/passwd"),
-            Err(CommandError::InvalidContainer(_))
+            Err(CommandError::InvalidConfigFile(_))
         ));
     }
 
