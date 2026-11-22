@@ -175,7 +175,7 @@ dependencies = [
 
 [[package]]
 name = "borbatop"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "borbatop-core",
  "borbatop-sources",
@@ -190,7 +190,7 @@ dependencies = [
 
 [[package]]
 name = "borbatop-core"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "borbatop-sources"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "borbatop-core",
  "criterion",
@@ -207,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "borbatop-tui"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "borbatop-core",
  "ratatui",
