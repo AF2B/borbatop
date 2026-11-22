@@ -1,6 +1,6 @@
 # Maintainer: André Borba
 pkgname=borbatop-git
-pkgver=2.r0.g0000000
+pkgver=3.r0.g0000000
 pkgrel=1
 pkgdesc='Native Linux task manager for the terminal, made for Arch (development version)'
 arch=('x86_64' 'aarch64')
@@ -22,7 +22,7 @@ sha256sums=('SKIP')
 
 pkgver() {
   cd borbatop
-  printf '2.r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  printf '3.r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
 }
 
 prepare() {
