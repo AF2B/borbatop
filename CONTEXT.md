@@ -47,6 +47,11 @@ A regra de ouro é "núcleo puro, efeitos nas bordas": tudo que interpreta texto
 - Namespaces principais: `borbatop_core::containers` (`ContainerInfo`, `container_id_of_unit`), `borbatop_sources::containers` (`list_containers`, `control_container`, `container_logs`, nomes validados), `borbatop_sources::pacman` (`UpgradeSource`, `AurUpgrades` por helper), `borbatop_sources::updater` (`update_command`: valida e devolve o comando, não executa), `borbatop_tui::dialog` (`UpdateDialog`, `PackagesDialog`, `ContainerDialog`).
 - Contratos de tipo: `ContainersView`/`ContainerView` (o que a aba recebe), `UpdateRequest`/`UpdateCommand`, `RepoSource`. O comando de atualização roda no terminal real: `run::update_on_terminal` desfaz a tela, executa, espera Enter e refaz a tela.
 
+### Update Doctor
+- Responsabilidade: reunir o que saber antes e depois de atualizar (notícias do Arch desde o último `-Syu`, espaço em disco, ferramenta de snapshot, serviços com biblioteca trocada, `.pacnew`) e montar os comandos de snapshot, `pacdiff` e reinício de serviços.
+- Namespaces principais: `borbatop_core::news` (`parse_news_feed`, `last_full_upgrade`, `is_low_on_space`), `borbatop_core::timestamps` (`parse_rfc822`, `parse_log_timestamp`), `borbatop_core::clock` (`unix_from_civil`), `borbatop_sources::doctor` (`fetch_news` via `curl`, `disk_headroom`, `find_snapshot_tool`, `pacnew_diff`), `borbatop_sources::updater` (`update_commands`: sequência validada), `borbatop::reports` (`doctor_text`, `pacnew_text`).
+- Contratos de tipo: `NewsFeed`/`NewsItem`, `SnapshotTool`, `UpdateRequest` (com `Snapshot`, `RepositoriesAfterSnapshot`, `MergeConfigs`, `RestartUnits`), `DoctorRequest`. Uma sequência de comandos para no primeiro que falha.
+
 ### Exportação
 - Responsabilidade: gravar a aba atual em JSON do jeito que a pessoa a vê (filtro, ordem, linhas), sem linhas de comando.
 - Namespaces principais: `borbatop_tui::input` (`ExportRequest`, `ExportContent`), `borbatop::export` (`write_export`, `export_json`), `borbatop_core::clock` (`UtcDateTime`, nome do arquivo em UTC).
@@ -110,6 +115,9 @@ Regra de dependência: `borbatop → {sources, tui} → core`, nunca o inverso; 
 - A lista de upgrades prefere `checkupdates` (lê cópia temporária do banco, lista fresca sem sincronizar o sistema) e cai para `pacman -Qu`, avisando que pode estar desatualizada.
 - Depois de uma atualização longa a thread amostradora acumulou amostras: a tela as consome antes de mostrar o resultado, senão a mensagem some na hora.
 - Ao ordenar ou inverter, o cursor vai para a primeira linha: a janela segue o cursor, e um cursor no meio da lista escondia o efeito da ordenação.
+- Sem rollback automático: reverter um sistema é destrutivo demais. O Doctor cria o snapshot e, se algo der errado, só aponta o comando de restauração (`snapper rollback`, `timeshift --restore`).
+- As notícias do Arch vêm do feed RSS oficial por `curl` (10 s), lidas por um leitor próprio e tolerante no núcleo; sem rede, o Doctor diz isso e segue com o resto.
+- No Pacman, `s`, `p`, `d` e `x` têm outro significado que nas demais abas (snapshot, merge, diff, reinício); o `handle_char` trata essas teclas antes das globais.
 - Sem crate nova para JSON: `core::json` escreve e lê só o que o programa produz (inteiros, decimais com até duas casas, strings, arrays, objetos). O que não for isso é recusado, não arredondado.
 - Renice e afinidade valem por thread no Linux: as funções percorrem `/proc/[pid]/task`. Não existe forma com pidfd; a hora de início é conferida logo antes (risco residual de milissegundos, com efeito só em prioridade ou máscara).
 - Processos com capabilities de arquivo (ex.: `kwin_wayland`) escondem `/proc/[pid]/exe` e ficam com pacote `—`; não foi adotado fallback por `argv[0]` porque o próprio processo controla esse texto.
