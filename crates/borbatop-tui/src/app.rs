@@ -607,6 +607,9 @@ impl App {
     /// Selects the first row of the new order, so the effect of a sort is always visible: the
     /// view follows the selection, and a cursor left in the middle would hide the change.
     fn jump_to_top(&mut self) {
+        if self.tab != Tab::Processes {
+            return;
+        }
         let first = self
             .visible_processes()
             .first()
@@ -919,9 +922,18 @@ impl App {
             );
             return None;
         };
-        match Dialog::update(view) {
-            Some(dialog) => self.dialog = Some(dialog),
-            None => self.notify("nothing to update", MessageKind::Info),
+        if let Some(dialog) = Dialog::update(view) {
+            self.dialog = Some(dialog);
+            return None;
+        }
+        let unknown = view.upgrades.is_err() || view.aur.iter().any(|aur| aur.upgrades.is_err());
+        if unknown {
+            self.notify(
+                "cannot tell what is pending: some upgrade lists could not be read",
+                MessageKind::Error,
+            );
+        } else {
+            self.notify("nothing to update", MessageKind::Info);
         }
         None
     }
@@ -1628,6 +1640,34 @@ mod tests {
             }))
         );
         assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn unreadable_upgrade_lists_are_not_reported_as_nothing_to_update() {
+        let mut view = pacman_view(Vec::new(), Vec::new());
+        view.upgrades = Err("no network".to_owned());
+        let mut app = app_on_pacman(view);
+        app.handle_key(Key::Char('u'));
+        assert!(app.dialog.is_none());
+        let message = app.message.as_ref().unwrap();
+        assert_eq!(message.kind, MessageKind::Error);
+        assert!(message.text.contains("cannot tell"), "{}", message.text);
+    }
+
+    #[test]
+    fn sort_keys_on_other_tabs_leave_the_process_cursor_alone() {
+        let mut app = app_with(vec![
+            row(1, 0, 10, "a"),
+            row(2, 0, 900, "b"),
+            row(3, 0, 50, "c"),
+        ]);
+        app.handle_key(Key::Down);
+        let before = app.selected_pid;
+        app.handle_key(Key::Char('2'));
+        app.handle_key(Key::Char('r'));
+        app.handle_key(Key::Char('s'));
+        app.handle_key(Key::Char('1'));
+        assert_eq!(app.selected_pid, before);
     }
 
     #[test]
