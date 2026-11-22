@@ -22,6 +22,35 @@ One screen for processes, systemd services, pacman, sockets, boot time, the syst
 
 The top of the screen always shows per-core CPU, memory, swap, pressure stall (PSI), load, uptime and temperature. When a reading goes over its threshold (CPU, memory, swap, pressure, temperature, failed units) the header lists it in red, whatever tab is open.
 
+## Features at a glance
+
+| Feature | What it does | How to use it |
+|---|---|---|
+| Process table | CPU, memory, threads, owner, unit, owning package, command line | Processes tab (`1`) |
+| Sort and filter | Order by CPU, memory, PID or command; filter by command, user, unit or package | `s`, `r`, `/`, click a column title |
+| Tree view | Processes arranged by parent | `t`, `--tree` |
+| Process details | Open files, sockets, limits, memory | `Enter` |
+| Signals | SIGTERM, SIGHUP, SIGKILL, with confirmation; never hits a reused PID | `K` |
+| Priority (nice) | Change how the CPU is shared, -20 to 19, on every thread | `n` |
+| CPU affinity | Choose the cores a process may run on | `c` |
+| Services | systemd units, failures first; journal; start, stop, restart | Services tab (`2`), `l`, `a` |
+| Pacman | Pending upgrades, orphans, kernel versus installed, `.pacnew`, stale libraries | Pacman tab (`3`) |
+| Package updates | Whole-repository upgrade, AUR per helper (`yay`, `paru`), on the real terminal | `u` on the Pacman tab |
+| Network and disk | Throughput per interface and disk, filesystem fill | Network · Disk tab (`4`) |
+| Connections | Every TCP and UDP socket with its owning process | Connections tab (`5`) |
+| Boot | Startup summary and slowest units | Boot tab (`6`) |
+| Logs | System journal errors and warnings since boot | Logs tab (`7`) |
+| GPU | AMD, Intel and NVIDIA load, video memory, temperature | GPU tab (`8`) |
+| Containers | Podman and Docker: list, start, stop, restart, remove, logs | Containers tab (`9`), `a`, `l` |
+| Alerts | Header lists readings over their threshold on any tab | `[alerts]` in `config.toml` |
+| Mouse | Click tabs, column titles and rows; wheel moves the selection | on by default, `--no-mouse` |
+| Export | Save the tab being shown as JSON | `e` |
+| Snapshot | One sample as JSON on standard output | `borbatop snapshot` |
+| Record and replay | Save samples to a file and play them back, paused or stepped | `borbatop record`, `borbatop replay` |
+| Pause | Freeze the screen | `Space` |
+| Themes | Borba truecolor palette or the terminal's 16 colors | `--theme`, `theme` in `config.toml` |
+| Completions and manual | Shell completions and a man page | `borbatop completions`, `borbatop man` |
+
 ## Install
 
 From source (Rust stable):
@@ -52,6 +81,31 @@ borbatop snapshot --with-commands         # ... including full command lines
 borbatop record trace.jsonl -n 120        # 120 samples to a new file (JSON Lines)
 borbatop replay trace.jsonl               # look at it on screen; Space pauses, ←/→ step
 ```
+
+### Commands
+
+| Command | What it does |
+|---|---|
+| `borbatop` | Open the screen on the live machine |
+| `borbatop snapshot [--with-commands]` | Take one sample, print it as JSON and exit |
+| `borbatop record <FILE> [-n <SAMPLES>] [--with-commands]` | Record samples (default 60, one per interval) to a new JSON Lines file |
+| `borbatop replay <FILE>` | Open the screen over a recording |
+| `borbatop completions <SHELL>` | Print a completion script (`bash`, `zsh`, `fish`, ...) |
+| `borbatop man` | Print the manual page |
+| `borbatop help [COMMAND]` | Show help |
+
+### Options
+
+| Option | Meaning | Default |
+|---|---|---|
+| `--config <PATH>` | Configuration file | `$XDG_CONFIG_HOME/borbatop/config.toml` |
+| `-i`, `--interval-ms <MS>` | Time between samples, 200 to 10000 | 1000 |
+| `--theme <borba\|ansi>` | Palette | `borba` |
+| `-t`, `--tree` | Start with processes as a tree | off |
+| `--no-package` | Hide the package column | shown |
+| `--no-mouse` | Leave the mouse to the terminal | captured |
+| `-V`, `--version` | Print the version | |
+| `-h`, `--help` | Print help | |
 
 ### Keys
 
@@ -104,6 +158,20 @@ The news comes from `archlinux.org` through `curl` (10-second limit); offline, t
 ### Configuration
 
 `~/.config/borbatop/config.toml` (or `$XDG_CONFIG_HOME/borbatop/config.toml`); see `packaging/config.example.toml`. Every key is optional, unknown keys are rejected, and command-line flags win over the file. The `[alerts]` table sets the level at which each reading raises an alert.
+
+| Key | Meaning | Default |
+|---|---|---|
+| `interval_ms` | Time between samples, 200 to 10000 | 1000 |
+| `theme` | `"borba"` or `"ansi"` | `"borba"` |
+| `tree` | Start with processes as a tree | `false` |
+| `show_package` | Show the owning package column | `true` |
+| `mouse` | Capture clicks and the wheel | `true` |
+| `history` | Samples kept for sparklines, 8 to 600 | 60 |
+| `[alerts] cpu_percent` | Machine-wide CPU usage that raises an alert, 1 to 100 | 90 |
+| `[alerts] memory_percent` | Memory in use, 1 to 100 | 90 |
+| `[alerts] swap_percent` | Swap in use, 1 to 100 | 90 |
+| `[alerts] pressure_percent` | Pressure stall (PSI, 10-second average), 1 to 100 | 20 |
+| `[alerts] temperature_celsius` | CPU temperature, 30 to 120 | 85 |
 
 ## Requirements
 
