@@ -1,6 +1,6 @@
 # Maintainer: André Borba
 pkgname=borbatop
-pkgver=1
+pkgver=2
 pkgrel=1
 pkgdesc='Native Linux task manager for the terminal, made for Arch'
 arch=('x86_64' 'aarch64')

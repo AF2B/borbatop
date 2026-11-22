@@ -246,7 +246,7 @@ footer i { color: var(--status-ok); font-style: normal; }
       <a href="#decisoes">Decisões</a>
       <a href="https://github.com/AF2B/borbatop" rel="noopener">GitHub</a>
     </nav>
-    <div class="status"><i>●</i> v1</div>
+    <div class="status"><i>●</i> v2</div>
   </div>
 </header>
 
@@ -597,7 +597,7 @@ pub fn cpu_permille(
 
 <footer>
   <div class="wrap">
-    <span class="proj">Borba Top · v1</span>
+    <span class="proj">Borba Top · v2</span>
     <span><i>●</i> preview com dados sintéticos</span>
     <span>Arch Linux · Rust edição 2024</span>
   </div>
@@ -695,7 +695,7 @@ function spark(values, maxValue = 100) {
   const lines = [
     "$ paru -S borbatop-git        # proposto: o pacote ainda não existe",
     "$ borbatop",
-    "BORBA. borbatop 1.0.0 · cpu 41% · mem 12.1/32.0 GiB · 2 units failed",
+    "BORBA. borbatop 2.0.0 · cpu 41% · mem 12.1/32.0 GiB · 2 units failed",
   ];
   if (matchMedia("(prefers-reduced-motion: reduce)").matches) {
     target.textContent = lines.join("\n");
@@ -1234,7 +1234,7 @@ function render() {
   const stamp = new Date().toLocaleTimeString("pt-BR", { hour12: false });
   const replayTag = replay ? ` · <span class="replay">${state.paused ? "⏸" : "▶"} replay ${replay.index + 1}/${replay.frames.length}</span>` : "";
   screenEl.innerHTML = `
-    <div class="tbar"><span><b>BORBA<span class="dot">.</span></b><span class="name">borbatop 1.0.0</span></span><span class="alert">${alertBanner()}</span><span>arch · linux 7.2.11-arch1-1 · ${stamp}${replayTag}</span></div>
+    <div class="tbar"><span><b>BORBA<span class="dot">.</span></b><span class="name">borbatop 2.0.0</span></span><span class="alert">${alertBanner()}</span><span>arch · linux 7.2.11-arch1-1 · ${stamp}${replayTag}</span></div>
     ${topHtml()}${tabsHtml()}${body}${statusHtml()}${dialogHtml()}${detailHtml()}`;
 }
 
