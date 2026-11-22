@@ -153,6 +153,8 @@ pub struct PacmanView {
     pub upgrades: Result<Vec<Upgrade>, String>,
     /// How the repository upgrades were found.
     pub repo_source: RepoSource,
+    /// Program name of the snapshot tool installed on the machine (`snapper` or `timeshift`).
+    pub snapshot_tool: Option<String>,
     /// AUR upgrades, one entry per installed AUR helper (none when there is no helper).
     pub aur: Vec<AurView>,
     /// Orphaned packages, or why they are unknown.

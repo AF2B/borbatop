@@ -311,6 +311,10 @@ fn pacman_json(view: &PacmanView) -> Json {
     Json::object([
         ("upgrades", part(&view.upgrades, |list| upgrades_json(list))),
         (
+            "snapshot_tool",
+            Json::or_null(view.snapshot_tool.as_deref().map(Json::text)),
+        ),
+        (
             "upgrades_source",
             Json::text(match view.repo_source {
                 RepoSource::Checkupdates => "checkupdates",
@@ -520,6 +524,7 @@ mod tests {
         let view = PacmanView {
             upgrades: Ok(Vec::new()),
             repo_source: RepoSource::LocalDatabase,
+            snapshot_tool: Some("snapper".to_owned()),
             aur: Vec::new(),
             orphans: Err("pacman -Qdtq: not found".to_owned()),
             kernel: Ok(KernelView {
@@ -542,6 +547,7 @@ mod tests {
         );
         assert!(text.contains(r#""aur":[]"#));
         assert!(text.contains(r#""upgrades_source":"local database""#));
+        assert!(text.contains(r#""snapshot_tool":"snapper""#));
         assert!(text.contains(r#""cache_bytes":4096"#));
         assert!(text.contains(r#""stale_unreadable_processes":2"#));
     }

@@ -7,6 +7,7 @@ mod connections;
 mod containers;
 mod detail;
 mod diagnostics;
+mod doctor;
 mod error;
 mod gpu;
 mod identity;
@@ -26,6 +27,10 @@ pub use containers::{
 };
 pub use detail::{OpenDescriptor, ProcessDetail, process_detail};
 pub use diagnostics::{JournalLevel, startup_blame, startup_summary, system_journal};
+pub use doctor::{
+    Headroom, SnapshotTool, disk_headroom, fetch_news, find_snapshot_tool, installed_snapshot_tool,
+    last_upgrade_time, pacnew_diff,
+};
 pub use error::{CommandError, ParseCause, Reading, SourceError};
 pub use gpu::{GpuReport, collect_gpus};
 pub use owners::{FileOwners, PACMAN_LOCAL_DB};
@@ -39,4 +44,4 @@ pub use signal::{Signal, SignalError, send_signal};
 pub use statics::{NOT_AVAILABLE, ProcessStatics};
 pub use system::{MountReport, MountUsage, SystemCollector, SystemSnapshot};
 pub use units::{UnitAction, control_unit, list_units, unit_logs};
-pub use updater::{UpdateCommand, UpdateError, UpdateRequest, update_command};
+pub use updater::{UpdateCommand, UpdateError, UpdateRequest, update_commands};

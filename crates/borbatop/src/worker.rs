@@ -9,17 +9,18 @@ use std::thread;
 use borbatop_core::{Pid, ProcessId};
 use borbatop_sources::{
     ContainerAction, JournalLevel, SystemCollector, UnitAction, collect_connections, collect_gpus,
-    collect_pacman_report, container_logs, control_container, control_unit, list_containers,
-    list_units, process_detail, startup_blame, startup_summary, system_journal, unit_logs,
+    collect_pacman_report, container_logs, control_container, control_unit, disk_headroom,
+    fetch_news, last_upgrade_time, list_containers, list_units, pacnew_diff, process_detail,
+    startup_blame, startup_summary, system_journal, unit_logs,
 };
-use borbatop_tui::{ContainersView, Model, PacmanView, Report, Tab};
+use borbatop_tui::{ContainersView, DoctorRequest, Model, PacmanView, Report, Tab};
 
 use crate::config::Settings;
 use crate::convert::pacman_view;
 use crate::model::ModelBuilder;
 use crate::reports::{
-    ProcessUsage, boot_report, connections_report, containers_view, detail_text, gpu_report,
-    logs_report,
+    DoctorFacts, ProcessUsage, boot_report, connections_report, containers_view, detail_text,
+    doctor_text, gpu_report, logs_report, pacnew_text,
 };
 
 const SERVICES_EVERY_SAMPLES: u32 = 5;
@@ -242,6 +243,70 @@ fn build_report(tab: Tab) -> Result<Report, String> {
             Err(format!("{} has no on-demand report", tab.label()))
         }
     }
+}
+
+/// Gathers what the Update Doctor needs (the news needs the network, so it takes a moment) and
+/// sends the write-up as overlay text.
+///
+/// # Arguments
+///
+/// * `events` - where the text is sent
+/// * `request` - the Pacman report and the stale services the screen had
+///
+/// # Errors
+///
+/// Returns the OS error if the thread cannot be created.
+pub fn spawn_doctor(events: Sender<WorkerEvent>, request: DoctorRequest) -> io::Result<()> {
+    thread::Builder::new()
+        .name("borbatop-doctor".to_owned())
+        .spawn(move || {
+            let news = fetch_news().map_err(|error| error.to_string());
+            let last_upgrade = last_upgrade_time().map_err(|error| error.to_string());
+            let disks: Vec<Result<_, String>> = disk_headroom()
+                .into_iter()
+                .map(|room| room.map_err(|error| error.to_string()))
+                .collect();
+            let text = doctor_text(&DoctorFacts {
+                request: &request,
+                news: news.as_ref().map_err(String::as_str),
+                last_upgrade: last_upgrade.as_ref().copied().map_err(String::as_str),
+                disks: &disks,
+            });
+            let _delivered = events.send(WorkerEvent::Overlay {
+                title: "UPDATE DOCTOR".to_owned(),
+                result: Ok(text),
+            });
+        })
+        .map(|_handle| ())
+}
+
+/// Compares each `.pacnew` file with the configuration it belongs to, on its own thread.
+///
+/// # Arguments
+///
+/// * `events` - where the text is sent
+/// * `files` - `.pacnew` files, as the Pacman report listed them
+///
+/// # Errors
+///
+/// Returns the OS error if the thread cannot be created.
+pub fn spawn_pacnew_diffs(events: Sender<WorkerEvent>, files: Vec<String>) -> io::Result<()> {
+    thread::Builder::new()
+        .name("borbatop-pacnew".to_owned())
+        .spawn(move || {
+            let diffs: Vec<(String, Result<String, String>)> = files
+                .into_iter()
+                .map(|file| {
+                    let diff = pacnew_diff(&file).map_err(|error| error.to_string());
+                    (file, diff)
+                })
+                .collect();
+            let _delivered = events.send(WorkerEvent::Overlay {
+                title: "PACNEW DIFFS".to_owned(),
+                result: Ok(pacnew_text(&diffs)),
+            });
+        })
+        .map(|_handle| ())
 }
 
 /// Lists the containers of every installed runtime on its own thread.

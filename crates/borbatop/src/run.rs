@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use borbatop_core::{Nice, Pid, ProcessId};
 use borbatop_sources::{
-    ScheduleError, UpdateCommand, send_signal, set_affinity, set_nice, update_command,
+    ScheduleError, UpdateCommand, send_signal, set_affinity, set_nice, update_commands,
 };
 use borbatop_tui::{
     App, Command, ExportRequest, Key, MessageKind, Model, Seek, SignalChoice, UiConfig, UpdatePlan,
@@ -23,7 +23,8 @@ use crate::export::write_export;
 use crate::reports::ProcessUsage;
 use crate::worker::{
     WorkerEvent, spawn_container_action, spawn_container_logs, spawn_containers, spawn_detail,
-    spawn_logs, spawn_pacman, spawn_report, spawn_sampler, spawn_unit_action,
+    spawn_doctor, spawn_logs, spawn_pacman, spawn_pacnew_diffs, spawn_report, spawn_sampler,
+    spawn_unit_action,
 };
 
 const INPUT_POLL: Duration = Duration::from_millis(100);
@@ -241,6 +242,8 @@ fn dispatch(
         | Command::LoadLogs { .. }
         | Command::LoadContainers
         | Command::LoadContainerLogs { .. }
+        | Command::LoadDoctor(_)
+        | Command::LoadPacnewDiffs(_)
         | Command::Export(_) => {
             return execute(command, app, events);
         }
@@ -276,7 +279,9 @@ fn execute(command: Command, app: &mut App, events: &Sender<WorkerEvent>) -> boo
         | Command::RefreshPacman
         | Command::LoadContainers
         | Command::ControlContainer { .. }
-        | Command::LoadContainerLogs { .. } => spawn_background(command, app, events),
+        | Command::LoadContainerLogs { .. }
+        | Command::LoadDoctor(_)
+        | Command::LoadPacnewDiffs(_) => spawn_background(command, app, events),
     }
     true
 }
@@ -326,6 +331,14 @@ fn spawn_background(command: Command, app: &mut App, events: &Sender<WorkerEvent
             "read the container logs".to_owned(),
             spawn_container_logs(events.clone(), runtime, id, name),
         ),
+        Command::LoadDoctor(request) => (
+            "start the update doctor".to_owned(),
+            spawn_doctor(events.clone(), *request),
+        ),
+        Command::LoadPacnewDiffs(files) => (
+            "compare the .pacnew files".to_owned(),
+            spawn_pacnew_diffs(events.clone(), files),
+        ),
         // The other commands never reach this function.
         Command::Quit
         | Command::Seek(_)
@@ -347,8 +360,8 @@ fn update_on_terminal(
     plan: &UpdatePlan,
     mouse: bool,
 ) -> io::Result<()> {
-    let command = match update_command(&update_request_of(plan)) {
-        Ok(command) => command,
+    let commands = match update_commands(&update_request_of(plan)) {
+        Ok(commands) => commands,
         Err(error) => {
             app.notify(format!("update refused: {error}"), MessageKind::Error);
             return Ok(());
@@ -357,7 +370,7 @@ fn update_on_terminal(
 
     capture_mouse_release(mouse)?;
     ratatui::restore();
-    let status = run_on_terminal(&command);
+    let outcome = run_on_terminal(&commands);
     *terminal = ratatui::try_init()?;
     capture_mouse(mouse)?;
 
@@ -366,44 +379,61 @@ fn update_on_terminal(
     while let Ok(update) = received.try_recv() {
         apply(update, app);
     }
-    report_update(app, &command, status);
+    report_update(app, &commands, outcome);
     if let Some(refresh) = app.handle_key(Key::Char('R')) {
         execute(refresh, app, events);
     }
     Ok(())
 }
 
-/// Runs the command with the terminal's own input and output, then waits for Enter so the person
-/// can read what it printed.
-fn run_on_terminal(command: &UpdateCommand) -> io::Result<ExitStatus> {
-    println!(
-        "
-borbatop: running `{command}`
-"
-    );
-    let status = Program::new(command.program())
-        .args(command.arguments())
-        .status();
-    println!(
-        "
-borbatop: press Enter to return to the screen."
-    );
-    // Any answer, or none at all (input closed), brings the screen back.
-    let _answer = io::stdin().lock().lines().next();
-    status
+/// How far a sequence of commands got.
+struct Outcome<'a> {
+    /// The last command that ran: the one that failed, or the final one.
+    last: &'a UpdateCommand,
+    /// Its exit status, or why it could not be started.
+    status: io::Result<ExitStatus>,
 }
 
-fn report_update(app: &mut App, command: &UpdateCommand, status: io::Result<ExitStatus>) {
+/// Runs the commands one after another with the terminal's own input and output, stopping at
+/// the first that fails, then waits for Enter so the person can read what they printed.
+fn run_on_terminal(commands: &[UpdateCommand]) -> Option<Outcome<'_>> {
+    let mut outcome = None;
+    for command in commands {
+        println!("\nborbatop: running `{command}`\n");
+        let status = Program::new(command.program())
+            .args(command.arguments())
+            .status();
+        let worked = status.as_ref().is_ok_and(ExitStatus::success);
+        outcome = Some(Outcome {
+            last: command,
+            status,
+        });
+        if !worked {
+            break;
+        }
+    }
+    println!("\nborbatop: press Enter to return to the screen.");
+    // Any answer, or none at all (input closed), brings the screen back.
+    let _answer = io::stdin().lock().lines().next();
+    outcome
+}
+
+fn report_update(app: &mut App, commands: &[UpdateCommand], outcome: Option<Outcome<'_>>) {
+    let Some(Outcome { last, status }) = outcome else {
+        app.notify("nothing to run", MessageKind::Error);
+        return;
+    };
     match status {
         Ok(status) if status.success() => {
-            app.notify(format!("`{command}` finished"), MessageKind::Info);
+            let shown: Vec<String> = commands.iter().map(ToString::to_string).collect();
+            app.notify(
+                format!("`{}` finished", shown.join(" && ")),
+                MessageKind::Info,
+            );
         }
-        Ok(status) => app.notify(
-            format!("`{command}` ended with {status}"),
-            MessageKind::Error,
-        ),
+        Ok(status) => app.notify(format!("`{last}` ended with {status}"), MessageKind::Error),
         Err(error) => app.notify(
-            format!("cannot run {}: {error}", command.program()),
+            format!("cannot run {}: {error}", last.program()),
             MessageKind::Error,
         ),
     }

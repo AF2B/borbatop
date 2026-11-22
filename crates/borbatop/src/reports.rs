@@ -8,11 +8,15 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use borbatop_core::{
-    Bytes, ContainerInfo, FdKind, GpuCard, GpuVendor, Permille, SocketState, StartupBlame,
-    container_id_of_unit, same_container,
+    Bytes, ContainerInfo, FdKind, GpuCard, GpuVendor, NewsFeed, Permille, SocketState,
+    StartupBlame, UtcDateTime, container_id_of_unit, is_low_on_space, same_container,
 };
-use borbatop_sources::{Connection, ConnectionReport, GpuReport, ProcessDetail, RuntimeListing};
-use borbatop_tui::{ContainerView, ContainersView, Report, ReportLine, ReportTone};
+use borbatop_sources::{
+    Connection, ConnectionReport, GpuReport, Headroom, ProcessDetail, RuntimeListing,
+};
+use borbatop_tui::{
+    ContainerView, ContainersView, DoctorRequest, RepoSource, Report, ReportLine, ReportTone,
+};
 
 const ADDRESS_WIDTH: usize = 28;
 const STATE_WIDTH: usize = 12;
@@ -471,6 +475,206 @@ pub fn gpu_report(report: &GpuReport) -> Report {
     Report { lines }
 }
 
+// --------------------------------------------------------------------- doctor
+
+const LATEST_NEWS_WITHOUT_HISTORY: usize = 5;
+const MAX_DIFF_LINES_PER_FILE: usize = 120;
+
+/// Everything the Update Doctor gathered, ready to be written up.
+pub struct DoctorFacts<'a> {
+    /// The Pacman report and the stale services the screen had.
+    pub request: &'a DoctorRequest,
+    /// The news feed, or why it could not be fetched.
+    pub news: Result<&'a NewsFeed, &'a str>,
+    /// When the last full upgrade started, or why it is unknown (`None` inside: never found).
+    pub last_upgrade: Result<Option<u64>, &'a str>,
+    /// Free space where an upgrade writes.
+    pub disks: &'a [Result<Headroom, String>],
+}
+
+fn when(seconds: u64) -> String {
+    UtcDateTime::from_unix_seconds(seconds).to_string()
+}
+
+fn news_lines(facts: &DoctorFacts<'_>, lines: &mut Vec<String>) {
+    let since = facts.last_upgrade.as_ref().ok().copied().flatten();
+    match since {
+        Some(seconds) => lines.push(format!(
+            "News since your last full upgrade ({}):",
+            when(seconds)
+        )),
+        None => lines.push("News (the last full upgrade was not found in pacman.log):".to_owned()),
+    }
+    if let Err(reason) = &facts.last_upgrade {
+        lines.push(format!("  could not read pacman.log: {reason}"));
+    }
+    let feed = match facts.news {
+        Ok(feed) => feed,
+        Err(reason) => {
+            lines.push(format!("  could not fetch the news: {reason}"));
+            return;
+        }
+    };
+    let mut recent = feed.published_after(since);
+    if since.is_none() {
+        recent.truncate(LATEST_NEWS_WITHOUT_HISTORY);
+    }
+    if recent.is_empty() {
+        lines.push("  nothing new: no announcement since then".to_owned());
+    }
+    for item in recent {
+        let mark = if item.needs_manual_intervention() {
+            "!"
+        } else {
+            "·"
+        };
+        lines.push(format!("  {mark} {}", item.title()));
+        lines.push(format!("    {}", item.link()));
+    }
+}
+
+fn disk_lines(disks: &[Result<Headroom, String>], lines: &mut Vec<String>) {
+    lines.push("Disk space:".to_owned());
+    for disk in disks {
+        match disk {
+            Ok(room) => {
+                let verdict = if is_low_on_space(room.free(), room.total()) {
+                    "LOW: free some space before updating"
+                } else {
+                    "ok"
+                };
+                lines.push(format!(
+                    "  {:<24} {} free of {}  {verdict}",
+                    room.path(),
+                    room.free(),
+                    room.total()
+                ));
+            }
+            Err(reason) => lines.push(format!("  cannot measure: {reason}")),
+        }
+    }
+}
+
+fn before_lines(facts: &DoctorFacts<'_>, lines: &mut Vec<String>) {
+    lines.push("BEFORE YOU UPDATE".to_owned());
+    news_lines(facts, lines);
+    disk_lines(facts.disks, lines);
+    match &facts.request.pacman.snapshot_tool {
+        Some(tool) => lines.push(format!(
+            "Snapshot: {tool} found. `s` takes one now; `u` offers \"snapshot first\"."
+        )),
+        None => lines.push(
+            "Snapshot: no tool found. Install snapper or timeshift to take one before updating."
+                .to_owned(),
+        ),
+    }
+    let pacman = &facts.request.pacman;
+    let repo = pacman.upgrades.as_ref().map_or_else(
+        |reason| format!("unknown ({reason})"),
+        |list| list.len().to_string(),
+    );
+    let source = match pacman.repo_source {
+        RepoSource::Checkupdates => "fresh, via checkupdates",
+        RepoSource::LocalDatabase => "from the local database: may be stale",
+    };
+    lines.push(format!("Pending: {repo} repository upgrades ({source})."));
+    for aur in &pacman.aur {
+        let count = aur.upgrades.as_ref().map_or_else(
+            |reason| format!("unknown ({reason})"),
+            |list| list.len().to_string(),
+        );
+        lines.push(format!("         {count} AUR upgrades ({})", aur.helper));
+    }
+}
+
+fn after_lines(facts: &DoctorFacts<'_>, lines: &mut Vec<String>) {
+    let pacman = &facts.request.pacman;
+    lines.push(String::new());
+    lines.push("AFTER YOU UPDATE".to_owned());
+    match &pacman.kernel {
+        Ok(kernel) if kernel.reboot_recommended => lines.push(format!(
+            "Kernel: running {}: a newer one is installed, reboot to use it.",
+            kernel.running
+        )),
+        Ok(kernel) => lines.push(format!("Kernel: running {}: up to date.", kernel.running)),
+        Err(reason) => lines.push(format!("Kernel: unknown ({reason})")),
+    }
+    if facts.request.stale_units.is_empty() {
+        lines.push("Services: none runs with a replaced library.".to_owned());
+    } else {
+        lines.push(format!(
+            "Services using a replaced library (`x` restarts them): {}",
+            facts.request.stale_units.join(", ")
+        ));
+    }
+    let others = pacman.stale.len();
+    lines.push(format!(
+        "Programs using a replaced library: {others} process(es); restart them to load the new one."
+    ));
+    match &pacman.pending_config {
+        Ok(files) if files.is_empty() => {
+            lines.push("Config files: no .pacnew or .pacsave left.".to_owned());
+        }
+        Ok(files) => lines.push(format!(
+            "Config files: {} to review (`d` shows what changed, `p` merges with pacdiff).",
+            files.len()
+        )),
+        Err(reason) => lines.push(format!("Config files: unknown ({reason})")),
+    }
+    lines.push(String::new());
+    lines.push(
+        "Rollback is never automatic: with a snapshot, restore it with `snapper rollback` or `timeshift --restore`."
+            .to_owned(),
+    );
+}
+
+/// The overlay text of the Update Doctor.
+///
+/// # Arguments
+///
+/// * `facts` - what was gathered about the machine, the news and the disks
+#[must_use]
+pub fn doctor_text(facts: &DoctorFacts<'_>) -> String {
+    let mut lines = Vec::new();
+    before_lines(facts, &mut lines);
+    after_lines(facts, &mut lines);
+    let mut text = lines.join("\n");
+    text.push('\n');
+    text
+}
+
+/// The overlay text for the `.pacnew` comparisons: one section per file.
+///
+/// # Arguments
+///
+/// * `diffs` - `(file, diff text or why it failed)` per `.pacnew` file
+#[must_use]
+pub fn pacnew_text(diffs: &[(String, Result<String, String>)]) -> String {
+    let mut text = String::new();
+    for (file, diff) in diffs {
+        let _written = writeln!(text, "=== {file}");
+        match diff {
+            Ok(diff) if diff.trim().is_empty() => {
+                let _written = writeln!(text, "  identical to the current file");
+            }
+            Ok(diff) => {
+                for line in diff.lines().take(MAX_DIFF_LINES_PER_FILE) {
+                    let _written = writeln!(text, "{line}");
+                }
+                let hidden = diff.lines().count().saturating_sub(MAX_DIFF_LINES_PER_FILE);
+                if hidden > 0 {
+                    let _written = writeln!(text, "  … {hidden} more lines");
+                }
+            }
+            Err(reason) => {
+                let _written = writeln!(text, "  cannot compare: {reason}");
+            }
+        }
+        text.push('\n');
+    }
+    text
+}
+
 // ----------------------------------------------------------------- containers
 
 #[derive(Default)]
@@ -605,6 +809,136 @@ mod tests {
             .find(|line| line.text.contains(needle))
             .unwrap_or_else(|| panic!("no line contains {needle:?}"))
             .tone
+    }
+
+    fn doctor_request(snapshot_tool: Option<&str>, stale_units: &[&str]) -> DoctorRequest {
+        DoctorRequest {
+            pacman: borbatop_tui::PacmanView {
+                upgrades: Ok(
+                    borbatop_core::parse_upgrades("linux 1 -> 2\nglibc 1 -> 2\n").unwrap(),
+                ),
+                repo_source: RepoSource::LocalDatabase,
+                snapshot_tool: snapshot_tool.map(str::to_owned),
+                aur: Vec::new(),
+                orphans: Ok(Vec::new()),
+                kernel: Ok(borbatop_tui::KernelView {
+                    running: "7.2.1".to_owned(),
+                    reboot_recommended: true,
+                }),
+                pending_config: Ok(vec!["/etc/pacman.conf.pacnew".to_owned()]),
+                cache: Err("n/a".to_owned()),
+                stale: Vec::new(),
+                stale_unreadable: 0,
+            },
+            stale_units: stale_units.iter().map(|unit| (*unit).to_owned()).collect(),
+        }
+    }
+
+    const GIB: u64 = 1_073_741_824;
+
+    #[test]
+    fn the_doctor_lists_news_since_the_last_upgrade_and_flags_manual_steps() {
+        let feed = borbatop_core::parse_news_feed(
+            "<item><title>Plasma needs manual intervention</title><link>https://a/1</link><pubDate>Wed, 21 Oct 2026 19:29:36 +0000</pubDate></item><item><title>Old news</title><link>https://a/2</link><pubDate>Mon, 05 Oct 2026 10:00:00 +0000</pubDate></item>",
+        );
+        let request = doctor_request(Some("snapper"), &["sshd.service"]);
+        let disks = [Ok(Headroom::new(
+            "/",
+            Bytes::new(50 * GIB),
+            Bytes::new(400 * GIB),
+        ))];
+
+        let text = doctor_text(&DoctorFacts {
+            request: &request,
+            news: Ok(&feed),
+            last_upgrade: Ok(Some(1_791_385_198)),
+            disks: &disks,
+        });
+
+        assert!(
+            text.contains("News since your last full upgrade (2026-10-07"),
+            "{text}"
+        );
+        assert!(text.contains("! Plasma needs manual intervention"));
+        assert!(text.contains("https://a/1"));
+        assert!(
+            !text.contains("Old news"),
+            "published before the last upgrade"
+        );
+        assert!(text.contains('/') && text.contains("ok"));
+        assert!(text.contains("Snapshot: snapper found"));
+        assert!(text.contains("2 repository upgrades (from the local database: may be stale)"));
+        assert!(text.contains("reboot to use it"));
+        assert!(text.contains("`x` restarts them): sshd.service"));
+        assert!(text.contains("1 to review"));
+        assert!(text.contains("Rollback is never automatic"));
+    }
+
+    #[test]
+    fn the_doctor_says_what_it_could_not_find_out() {
+        let request = doctor_request(None, &[]);
+        let disks = [
+            Ok(Headroom::new("/", Bytes::new(GIB), Bytes::new(400 * GIB))),
+            Err("no such directory".to_owned()),
+        ];
+
+        let text = doctor_text(&DoctorFacts {
+            request: &request,
+            news: Err("curl: timed out"),
+            last_upgrade: Ok(None),
+            disks: &disks,
+        });
+
+        assert!(text.contains("the last full upgrade was not found"));
+        assert!(text.contains("could not fetch the news: curl: timed out"));
+        assert!(text.contains("LOW: free some space"));
+        assert!(text.contains("cannot measure: no such directory"));
+        assert!(text.contains("Snapshot: no tool found"));
+        assert!(text.contains("none runs with a replaced library"));
+    }
+
+    #[test]
+    fn without_history_only_the_latest_news_are_shown() {
+        let mut items = String::new();
+        for n in 1..=8 {
+            let _written = write!(
+                items,
+                "<item><title>News {n}</title><link>https://a/{n}</link></item>"
+            );
+        }
+        let feed = borbatop_core::parse_news_feed(&items);
+        let request = doctor_request(None, &[]);
+
+        let text = doctor_text(&DoctorFacts {
+            request: &request,
+            news: Ok(&feed),
+            last_upgrade: Err("permission denied"),
+            disks: &[],
+        });
+
+        assert!(text.contains("could not read pacman.log: permission denied"));
+        assert!(text.contains("News 5") && !text.contains("News 6"));
+    }
+
+    #[test]
+    fn pacnew_diffs_show_each_file_and_say_when_nothing_differs() {
+        let mut long = String::new();
+        for n in 0..300 {
+            let _written = writeln!(long, "+line {n}");
+        }
+        let text = pacnew_text(&[
+            (
+                "/etc/a.pacnew".to_owned(),
+                Ok("--- a\n+++ b\n+new\n".to_owned()),
+            ),
+            ("/etc/b.pacnew".to_owned(), Ok(String::new())),
+            ("/etc/c.pacnew".to_owned(), Err("diff: gone".to_owned())),
+            ("/etc/d.pacnew".to_owned(), Ok(long)),
+        ]);
+        assert!(text.contains("=== /etc/a.pacnew\n--- a"));
+        assert!(text.contains("identical to the current file"));
+        assert!(text.contains("cannot compare: diff: gone"));
+        assert!(text.contains("… 180 more lines"));
     }
 
     #[test]
