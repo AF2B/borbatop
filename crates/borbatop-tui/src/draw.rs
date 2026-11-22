@@ -984,12 +984,30 @@ fn container_line(
     styles: &Styles,
     width: usize,
 ) -> Line<'static> {
+    let cells = container_cells(container, styles);
+    let used: usize = cells.iter().map(|(text, _)| text.chars().count()).sum();
+    let detail = format!("{} · {}", container.image, container.usage);
+    let pick = |style: Style| if selected { styles.selected } else { style };
+
+    let mut spans: Vec<Span<'static>> = cells
+        .into_iter()
+        .map(|(text, cell_style)| Span::styled(text, pick(cell_style)))
+        .collect();
+    spans.push(Span::styled(
+        fit(&detail, width.saturating_sub(used)),
+        pick(styles.secondary),
+    ));
+    Line::from(spans)
+}
+
+/// The fixed-width cells of a container row: state mark, name, id, runtime and status.
+fn container_cells(container: &ContainerView, styles: &Styles) -> [(String, Style); 5] {
     let (icon, style) = if container.running {
         ("●", styles.ok)
     } else {
         ("○", styles.secondary)
     };
-    let cells = [
+    [
         (format!("{icon} "), style),
         (
             format!("{} ", fit(&container.name, CONTAINER_NAME_WIDTH)),
@@ -1007,32 +1025,7 @@ fn container_line(
             format!("{} ", fit(&container.status, CONTAINER_STATUS_WIDTH)),
             style,
         ),
-    ];
-    let used: usize = cells.iter().map(|(text, _)| text.chars().count()).sum();
-    let detail = format!("{} · {}", container.image, container.usage);
-
-    let mut spans: Vec<Span<'static>> = cells
-        .into_iter()
-        .map(|(text, cell_style)| {
-            Span::styled(
-                text,
-                if selected {
-                    styles.selected
-                } else {
-                    cell_style
-                },
-            )
-        })
-        .collect();
-    spans.push(Span::styled(
-        fit(&detail, width.saturating_sub(used)),
-        if selected {
-            styles.selected
-        } else {
-            styles.secondary
-        },
-    ));
-    Line::from(spans)
+    ]
 }
 
 fn container_notes(view: &crate::model::ContainersView, styles: &Styles) -> Vec<Line<'static>> {
@@ -1068,19 +1061,38 @@ fn draw_containers(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let Some(crate::app::Fetch::Loaded(view)) = &app.containers else {
-        let text = if app.is_containers_loading() {
-            "reading…"
-        } else {
-            "press R to list the containers"
-        };
-        frame.render_widget(
-            Paragraph::new(Line::styled(text, styles.secondary)).style(styles.base),
-            inner,
-        );
-        return;
+    let lines = match &app.containers {
+        Some(crate::app::Fetch::Loaded(view)) => container_lines(app, view, inner, styles),
+        Some(crate::app::Fetch::Loading) => vec![Line::styled("reading…", styles.secondary)],
+        None => vec![Line::styled(
+            "press R to list the containers",
+            styles.secondary,
+        )],
     };
+    frame.render_widget(Paragraph::new(lines).style(styles.base), inner);
+}
 
+fn container_header(styles: &Styles) -> Line<'static> {
+    Line::from(Span::styled(
+        format!(
+            "  {} {} {} {} IMAGE · USAGE",
+            fit("NAME", CONTAINER_NAME_WIDTH),
+            fit("ID", CONTAINER_ID_WIDTH),
+            fit("RUNTIME", RUNTIME_WIDTH),
+            fit("STATUS", CONTAINER_STATUS_WIDTH),
+        ),
+        styles.accent,
+    ))
+}
+
+/// Header, the window of rows around the selection, and the notes under them. Also records
+/// where the rows were drawn, so clicks can be resolved.
+fn container_lines(
+    app: &App,
+    view: &crate::model::ContainersView,
+    inner: Rect,
+    styles: &Styles,
+) -> Vec<Line<'static>> {
     let notes = container_notes(view, styles);
     let rows = usize::from(inner.height)
         .saturating_sub(1)
@@ -1097,16 +1109,7 @@ fn draw_containers(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
         shown: containers.len().saturating_sub(start).min(rows),
     });
 
-    let mut lines = vec![Line::from(Span::styled(
-        format!(
-            "  {} {} {} {} IMAGE · USAGE",
-            fit("NAME", CONTAINER_NAME_WIDTH),
-            fit("ID", CONTAINER_ID_WIDTH),
-            fit("RUNTIME", RUNTIME_WIDTH),
-            fit("STATUS", CONTAINER_STATUS_WIDTH),
-        ),
-        styles.accent,
-    ))];
+    let mut lines = vec![container_header(styles)];
     if containers.is_empty() && view.has_runtime {
         lines.push(Line::styled("no containers", styles.secondary));
     }
@@ -1121,7 +1124,7 @@ fn draw_containers(frame: &mut Frame, area: Rect, app: &App, styles: &Styles) {
         },
     ));
     lines.extend(notes);
-    frame.render_widget(Paragraph::new(lines).style(styles.base), inner);
+    lines
 }
 
 fn rate_text(rate: Option<borbatop_core::BytesPerSecond>) -> String {
