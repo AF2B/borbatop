@@ -113,6 +113,8 @@ pub enum CommandError {
     InvalidContainer(String),
     /// The container runtime is not one this program knows how to drive.
     UnknownRuntime(String),
+    /// A path is not a `.pacnew` file under `/etc`.
+    InvalidConfigFile(String),
 }
 
 impl fmt::Display for CommandError {
@@ -132,6 +134,9 @@ impl fmt::Display for CommandError {
             Self::InvalidUnitName(name) => write!(formatter, "invalid unit name: {name:?}"),
             Self::InvalidContainer(name) => write!(formatter, "invalid container: {name:?}"),
             Self::UnknownRuntime(name) => write!(formatter, "unknown container runtime: {name:?}"),
+            Self::InvalidConfigFile(path) => {
+                write!(formatter, "not a .pacnew file under /etc: {path:?}")
+            }
         }
     }
 }
@@ -143,7 +148,8 @@ impl Error for CommandError {
             Self::Failed { .. }
             | Self::InvalidUnitName(_)
             | Self::InvalidContainer(_)
-            | Self::UnknownRuntime(_) => None,
+            | Self::UnknownRuntime(_)
+            | Self::InvalidConfigFile(_) => None,
         }
     }
 }

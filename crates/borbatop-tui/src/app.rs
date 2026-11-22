@@ -946,11 +946,26 @@ impl App {
                     .find(|process| process.pid == stale.pid)
             })
             .map(|process| process.unit.clone())
-            .filter(|unit| unit.ends_with(".service"))
+            .filter(|unit| self.is_system_service(unit))
             .collect();
         units.sort();
         units.dedup();
         units
+    }
+
+    /// Whether `unit` is a service of the system manager, the only one `sudo systemctl` reaches.
+    ///
+    /// User-session services (a user's `pipewire.service`) carry the same `.service` suffix but
+    /// live in another manager; the unit list tells them apart. Without the list, any service
+    /// is kept and `systemctl` reports the ones it does not know.
+    fn is_system_service(&self, unit: &str) -> bool {
+        if !unit.ends_with(".service") {
+            return false;
+        }
+        match &self.model.services {
+            Ok(list) => list.units().iter().any(|known| known.name() == unit),
+            Err(_reason) => true,
+        }
     }
 
     fn request_doctor(&mut self) -> Option<Command> {
@@ -1807,6 +1822,30 @@ mod tests {
                 stale_units: vec!["sshd.service".to_owned()],
             }))),
             "scopes and unknown pids are left out, duplicates collapse"
+        );
+    }
+
+    #[test]
+    fn services_of_the_user_manager_are_not_offered_for_restart() {
+        let mut view = pacman_view(Vec::new(), Vec::new());
+        view.stale = vec![stale(10), stale(11)];
+        let mut app = doctor_app(
+            view,
+            vec![
+                service_row(10, "sshd.service"),
+                service_row(11, "pipewire.service"),
+            ],
+        );
+        app.model.services = Ok(parse_systemctl_units(
+            "sshd.service loaded active running OpenSSH\n",
+        ));
+
+        assert_eq!(
+            app.handle_key(Key::Char('x')),
+            Some(Command::RunUpdate(UpdatePlan::RestartUnits {
+                units: vec!["sshd.service".to_owned()]
+            })),
+            "pipewire.service is not in the system manager's list"
         );
     }
 
