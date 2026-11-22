@@ -18,6 +18,7 @@ use borbatop_tui::{
 pub fn pacman_view(report: &PacmanReport) -> PacmanView {
     PacmanView {
         upgrades: converted(report.upgrades(), Clone::clone),
+        snapshot_tool: report.snapshot_tool().map(|tool| tool.program().to_owned()),
         repo_source: match report.upgrade_source() {
             UpgradeSource::Checkupdates => RepoSource::Checkupdates,
             UpgradeSource::LocalDatabase => RepoSource::LocalDatabase,
@@ -118,6 +119,14 @@ pub fn update_request_of(plan: &UpdatePlan) -> UpdateRequest {
         UpdatePlan::AurPackages { helper, packages } => UpdateRequest::AurPackages {
             helper: helper.clone(),
             packages: packages.clone(),
+        },
+        UpdatePlan::Snapshot { tool } => UpdateRequest::Snapshot { tool: tool.clone() },
+        UpdatePlan::RepositoriesAfterSnapshot { tool } => {
+            UpdateRequest::RepositoriesAfterSnapshot { tool: tool.clone() }
+        }
+        UpdatePlan::MergeConfigs => UpdateRequest::MergeConfigs,
+        UpdatePlan::RestartUnits { units } => UpdateRequest::RestartUnits {
+            units: units.clone(),
         },
     }
 }

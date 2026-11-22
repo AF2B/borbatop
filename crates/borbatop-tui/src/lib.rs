@@ -18,8 +18,8 @@ pub use alerts::{Alert, AlertKind, AlertThresholds, evaluate};
 pub use app::{App, MessageKind, UiConfig};
 pub use draw::{WORDMARK, draw};
 pub use input::{
-    Command, ContainerChoice, ExportContent, ExportOrder, ExportRequest, Key, Seek, ServiceAction,
-    SignalChoice, SortKey, Tab, UpdatePlan,
+    Command, ContainerChoice, DoctorRequest, ExportContent, ExportOrder, ExportRequest, Key, Seek,
+    ServiceAction, SignalChoice, SortKey, Tab, UpdatePlan,
 };
 pub use model::{
     AurView, ContainerView, ContainersView, DiskRow, KernelView, Model, MountRow, NetRow,

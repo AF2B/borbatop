@@ -331,6 +331,33 @@ pub enum UpdatePlan {
         /// Packages to upgrade; never empty.
         packages: Vec<String>,
     },
+    /// A snapshot of the system.
+    Snapshot {
+        /// Snapshot tool to run, `snapper` or `timeshift`.
+        tool: String,
+    },
+    /// A snapshot, then the full repository upgrade.
+    RepositoriesAfterSnapshot {
+        /// Snapshot tool to run, `snapper` or `timeshift`.
+        tool: String,
+    },
+    /// Merge the `.pacnew` files with `pacdiff`.
+    MergeConfigs,
+    /// Restart systemd units.
+    RestartUnits {
+        /// Units to restart; never empty.
+        units: Vec<String>,
+    },
+}
+
+/// What the Update Doctor looks at: the Pacman report as it is on screen, and the services that
+/// still run with a replaced library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorRequest {
+    /// The Pacman report.
+    pub pacman: PacmanView,
+    /// Systemd services that map a replaced library; restarting them picks up the new one.
+    pub stale_units: Vec<String>,
 }
 
 /// How the process table was ordered when it was exported.
@@ -413,6 +440,10 @@ pub enum Command {
     Export(Box<ExportRequest>),
     /// Run an update on the real terminal, where passwords and confirmations can be answered.
     RunUpdate(UpdatePlan),
+    /// Check what to know before and after an update: news, disk, snapshot, restarts, configs.
+    LoadDoctor(Box<DoctorRequest>),
+    /// Show what changed between each `.pacnew` file and the configuration it belongs to.
+    LoadPacnewDiffs(Vec<String>),
     /// Show everything known about one process.
     LoadDetail {
         /// Process to inspect: PID plus start time.

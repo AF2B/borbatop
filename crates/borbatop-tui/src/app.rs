@@ -8,7 +8,10 @@ use borbatop_core::{ActiveState, Pid, ProcessId, UnitRow, order_as_tree};
 
 use crate::alerts::{Alert, AlertThresholds, evaluate};
 use crate::dialog::{Dialog, DialogOutcome};
-use crate::input::{Command, ExportContent, ExportOrder, ExportRequest, Key, Seek, SortKey, Tab};
+use crate::input::{
+    Command, DoctorRequest, ExportContent, ExportOrder, ExportRequest, Key, Seek, SortKey, Tab,
+    UpdatePlan,
+};
 use crate::model::{
     ContainerView, ContainersView, Model, PacmanView, ProcessRow, Report, ReportLine, ReportTone,
 };
@@ -660,6 +663,11 @@ impl App {
 
     fn handle_char(&mut self, character: char) -> Option<Command> {
         match character {
+            'D' if self.tab == Tab::Pacman => self.request_doctor(),
+            's' if self.tab == Tab::Pacman => self.request_snapshot(),
+            'p' if self.tab == Tab::Pacman => self.request_config_merge(),
+            'd' if self.tab == Tab::Pacman => self.request_pacnew_diffs(),
+            'x' if self.tab == Tab::Pacman => self.request_service_restart(),
             'q' => Some(Command::Quit),
             'j' => self.navigate(Nav::Down),
             'k' => self.navigate(Nav::Up),
@@ -908,6 +916,114 @@ impl App {
         let id = ProcessId::new(process.pid, process.start_time);
         self.dialog = Some(Dialog::affinity(id, &process.command, cpu_count));
         None
+    }
+
+    /// The Pacman report, when it is ready; otherwise tells the person to wait.
+    fn ready_pacman(&mut self) -> Option<PacmanView> {
+        if let PacmanState::Loaded(view) = &self.pacman {
+            return Some((**view).clone());
+        }
+        self.notify(
+            "wait for the Pacman report to finish loading",
+            MessageKind::Error,
+        );
+        None
+    }
+
+    /// Systemd services that run with a library that was replaced on disk, from the report and
+    /// the processes on screen.
+    fn stale_service_units(&self) -> Vec<String> {
+        let PacmanState::Loaded(view) = &self.pacman else {
+            return Vec::new();
+        };
+        let mut units: Vec<String> = view
+            .stale
+            .iter()
+            .filter_map(|stale| {
+                self.model
+                    .processes
+                    .iter()
+                    .find(|process| process.pid == stale.pid)
+            })
+            .map(|process| process.unit.clone())
+            .filter(|unit| unit.ends_with(".service"))
+            .collect();
+        units.sort();
+        units.dedup();
+        units
+    }
+
+    fn request_doctor(&mut self) -> Option<Command> {
+        let pacman = self.ready_pacman()?;
+        Some(Command::LoadDoctor(Box::new(DoctorRequest {
+            pacman,
+            stale_units: self.stale_service_units(),
+        })))
+    }
+
+    fn request_snapshot(&mut self) -> Option<Command> {
+        let view = self.ready_pacman()?;
+        if let Some(tool) = view.snapshot_tool {
+            return Some(Command::RunUpdate(UpdatePlan::Snapshot { tool }));
+        }
+        self.notify(
+            "no snapshot tool found: install snapper or timeshift",
+            MessageKind::Error,
+        );
+        None
+    }
+
+    /// The `.pacnew` files the report found, or why there are none to show.
+    fn pending_config_files(&mut self) -> Option<Vec<String>> {
+        let view = self.ready_pacman()?;
+        match view.pending_config {
+            Ok(files) if !files.is_empty() => Some(files),
+            Ok(_) => {
+                self.notify("no .pacnew files to review", MessageKind::Info);
+                None
+            }
+            Err(reason) => {
+                self.notify(
+                    format!("cannot list .pacnew files: {reason}"),
+                    MessageKind::Error,
+                );
+                None
+            }
+        }
+    }
+
+    fn request_config_merge(&mut self) -> Option<Command> {
+        self.pending_config_files()
+            .map(|_files| Command::RunUpdate(UpdatePlan::MergeConfigs))
+    }
+
+    fn request_pacnew_diffs(&mut self) -> Option<Command> {
+        let files = self.pending_config_files()?;
+        let pacnew: Vec<String> = files
+            .into_iter()
+            .filter(|file| file.ends_with(".pacnew"))
+            .collect();
+        if pacnew.is_empty() {
+            self.notify(
+                "only .pacsave files are left: nothing to compare",
+                MessageKind::Info,
+            );
+            return None;
+        }
+        Some(Command::LoadPacnewDiffs(pacnew))
+    }
+
+    fn request_service_restart(&mut self) -> Option<Command> {
+        self.ready_pacman()?;
+        let units = self.stale_service_units();
+        if units.is_empty() {
+            self.notify(
+                "no service is running with a replaced library",
+                MessageKind::Info,
+            );
+            return None;
+        }
+        Some(Command::RunUpdate(UpdatePlan::RestartUnits { units }))
     }
 
     /// Opens the update picker for what the Pacman report found.
@@ -1292,6 +1408,8 @@ mod tests {
                 | Command::LoadReport(_)
                 | Command::LoadContainers
                 | Command::RunUpdate(_)
+                | Command::LoadDoctor(_)
+                | Command::LoadPacnewDiffs(_)
                 | Command::ControlContainer { .. }
                 | Command::LoadContainerLogs { .. }
                 | Command::RefreshPacman
@@ -1536,6 +1654,7 @@ mod tests {
         PacmanView {
             upgrades: Ok(repo),
             repo_source: crate::model::RepoSource::Checkupdates,
+            snapshot_tool: None,
             aur,
             orphans: Ok(Vec::new()),
             kernel: Err("n/a".to_owned()),
@@ -1640,6 +1759,156 @@ mod tests {
             }))
         );
         assert!(app.dialog.is_none());
+    }
+
+    fn service_row(pid: u32, unit: &str) -> ProcessRow {
+        let mut process = row(pid, 0, 1, "svc");
+        process.unit = unit.to_owned();
+        process
+    }
+
+    fn stale(pid: u32) -> crate::model::StaleView {
+        crate::model::StaleView {
+            pid: Pid::new(pid),
+            comm: "svc".to_owned(),
+            library: "libssl.so.3".to_owned(),
+        }
+    }
+
+    fn doctor_app(view: PacmanView, rows: Vec<ProcessRow>) -> App {
+        let mut app = app_with(rows);
+        app.handle_key(Key::Char('3'));
+        app.set_pacman(view);
+        app
+    }
+
+    #[test]
+    fn the_doctor_needs_the_report_and_carries_the_services_to_restart() {
+        let mut app = app_with(vec![]);
+        app.handle_key(Key::Char('3'));
+        assert_eq!(app.handle_key(Key::Char('D')), None);
+        assert!(app.message.as_ref().unwrap().text.contains("wait"));
+
+        let mut view = pacman_view(Vec::new(), Vec::new());
+        view.stale = vec![stale(10), stale(11), stale(12), stale(99)];
+        let mut app = doctor_app(
+            view.clone(),
+            vec![
+                service_row(10, "sshd.service"),
+                service_row(11, "sshd.service"),
+                service_row(12, "app-firefox-3.scope"),
+            ],
+        );
+        let command = app.handle_key(Key::Char('D'));
+        assert_eq!(
+            command,
+            Some(Command::LoadDoctor(Box::new(DoctorRequest {
+                pacman: view,
+                stale_units: vec!["sshd.service".to_owned()],
+            }))),
+            "scopes and unknown pids are left out, duplicates collapse"
+        );
+    }
+
+    #[test]
+    fn snapshot_needs_an_installed_tool() {
+        let mut app = doctor_app(pacman_view(Vec::new(), Vec::new()), vec![]);
+        assert_eq!(app.handle_key(Key::Char('s')), None);
+        assert!(
+            app.message
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("snapper or timeshift")
+        );
+
+        let mut view = pacman_view(Vec::new(), Vec::new());
+        view.snapshot_tool = Some("snapper".to_owned());
+        let mut app = doctor_app(view, vec![]);
+        assert_eq!(
+            app.handle_key(Key::Char('s')),
+            Some(Command::RunUpdate(UpdatePlan::Snapshot {
+                tool: "snapper".to_owned()
+            }))
+        );
+    }
+
+    #[test]
+    fn config_merge_and_diffs_need_pacnew_files() {
+        let mut app = doctor_app(pacman_view(Vec::new(), Vec::new()), vec![]);
+        assert_eq!(app.handle_key(Key::Char('p')), None);
+        assert_eq!(app.handle_key(Key::Char('d')), None);
+        assert!(app.message.as_ref().unwrap().text.contains("no .pacnew"));
+
+        let mut view = pacman_view(Vec::new(), Vec::new());
+        view.pending_config = Ok(vec![
+            "/etc/pacman.conf.pacnew".to_owned(),
+            "/etc/old.conf.pacsave".to_owned(),
+        ]);
+        let mut app = doctor_app(view, vec![]);
+        assert_eq!(
+            app.handle_key(Key::Char('p')),
+            Some(Command::RunUpdate(UpdatePlan::MergeConfigs))
+        );
+        assert_eq!(
+            app.handle_key(Key::Char('d')),
+            Some(Command::LoadPacnewDiffs(vec![
+                "/etc/pacman.conf.pacnew".to_owned()
+            ])),
+            ".pacsave files have nothing to compare"
+        );
+    }
+
+    #[test]
+    fn restarting_services_needs_at_least_one_stale_service() {
+        let mut app = doctor_app(pacman_view(Vec::new(), Vec::new()), vec![]);
+        assert_eq!(app.handle_key(Key::Char('x')), None);
+        assert!(app.message.as_ref().unwrap().text.contains("no service"));
+
+        let mut view = pacman_view(Vec::new(), Vec::new());
+        view.stale = vec![stale(10)];
+        let mut app = doctor_app(view, vec![service_row(10, "cups.service")]);
+        assert_eq!(
+            app.handle_key(Key::Char('x')),
+            Some(Command::RunUpdate(UpdatePlan::RestartUnits {
+                units: vec!["cups.service".to_owned()]
+            }))
+        );
+    }
+
+    #[test]
+    fn the_doctor_keys_are_only_special_on_the_pacman_tab() {
+        let mut app = app_with(vec![row(1, 0, 10, "a"), row(2, 0, 900, "b")]);
+        assert_eq!(app.handle_key(Key::Char('x')), None);
+        assert_eq!(app.handle_key(Key::Char('D')), None);
+        app.handle_key(Key::Char('s'));
+        assert_eq!(
+            app.sort,
+            SortKey::Memory,
+            "s still sorts on the Processes tab"
+        );
+    }
+
+    #[test]
+    fn the_update_dialog_offers_a_snapshot_first_when_a_tool_exists() {
+        let mut view = pacman_view(upgrades("linux 1 -> 2\n"), Vec::new());
+        view.snapshot_tool = Some("timeshift".to_owned());
+        let mut app = app_on_pacman(view);
+        app.handle_key(Key::Char('u'));
+        assert_eq!(
+            app.handle_key(Key::Enter),
+            Some(Command::RunUpdate(UpdatePlan::RepositoriesAfterSnapshot {
+                tool: "timeshift".to_owned()
+            })),
+            "the safer option comes first"
+        );
+
+        let mut app = app_on_pacman(pacman_view(upgrades("linux 1 -> 2\n"), Vec::new()));
+        app.handle_key(Key::Char('u'));
+        assert_eq!(
+            app.handle_key(Key::Enter),
+            Some(Command::RunUpdate(UpdatePlan::Repositories))
+        );
     }
 
     #[test]

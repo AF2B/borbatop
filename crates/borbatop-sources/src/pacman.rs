@@ -10,6 +10,7 @@ use borbatop_core::{
 };
 
 use crate::command::run;
+use crate::doctor::{SnapshotTool, installed_snapshot_tool};
 use crate::error::{CommandError, Reading, SourceError};
 
 const OSRELEASE: &str = "/proc/sys/kernel/osrelease";
@@ -146,6 +147,7 @@ pub enum UpgradeSource {
 pub struct PacmanReport {
     upgrades: Reading<Vec<Upgrade>>,
     upgrade_source: UpgradeSource,
+    snapshot_tool: Option<SnapshotTool>,
     aur: Vec<AurUpgrades>,
     orphans: Reading<Vec<String>>,
     kernel: Reading<KernelStatus>,
@@ -159,6 +161,12 @@ impl PacmanReport {
     #[must_use]
     pub const fn upgrades(&self) -> &Reading<Vec<Upgrade>> {
         &self.upgrades
+    }
+
+    /// The snapshot tool installed on this machine, if any.
+    #[must_use]
+    pub const fn snapshot_tool(&self) -> Option<SnapshotTool> {
+        self.snapshot_tool
     }
 
     /// How the repository upgrades were found.
@@ -216,6 +224,7 @@ pub fn collect_pacman_report(processes: &[(Pid, String)]) -> PacmanReport {
     PacmanReport {
         upgrades: upgrades.0,
         upgrade_source: upgrades.1,
+        snapshot_tool: installed_snapshot_tool(),
         aur: read_aur(),
         orphans: read_orphans(),
         kernel: kernel_status(Path::new(OSRELEASE), Path::new(KERNEL_MODULES)),

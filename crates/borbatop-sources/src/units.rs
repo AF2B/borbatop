@@ -113,7 +113,7 @@ pub fn control_unit(unit: &str, action: UnitAction) -> Result<(), CommandError> 
     .map(|_output| ())
 }
 
-fn is_valid_unit_name(unit: &str) -> bool {
+pub(crate) fn is_valid_unit_name(unit: &str) -> bool {
     !unit.is_empty()
         && unit.chars().count() <= MAX_UNIT_NAME_CHARS
         && !unit.starts_with('-')

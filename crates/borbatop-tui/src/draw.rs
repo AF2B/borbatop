@@ -1273,7 +1273,12 @@ fn hints_for(tab: Tab) -> &'static [(&'static str, &'static str)] {
         ],
         Tab::Pacman => &[
             ("↑↓", "scroll"),
+            ("D", "doctor"),
             ("u", "update"),
+            ("s", "snapshot"),
+            ("d", "diff"),
+            ("p", "merge"),
+            ("x", "restart"),
             ("R", "refresh"),
             ("e", "export"),
             ("q", "quit"),
@@ -1658,6 +1663,7 @@ mod tests {
         app.set_pacman(PacmanView {
             upgrades: Ok(Vec::new()),
             repo_source: RepoSource::LocalDatabase,
+            snapshot_tool: None,
             aur: Vec::new(),
             orphans: Ok(vec!["lld".to_owned(), "opencv".to_owned()]),
             kernel: Ok(KernelView {
@@ -1979,6 +1985,7 @@ mod tests {
             PacmanState::NotRequested | PacmanState::Loading => PacmanView {
                 upgrades: Ok(Vec::new()),
                 repo_source: RepoSource::LocalDatabase,
+                snapshot_tool: None,
                 aur: Vec::new(),
                 orphans: Ok(Vec::new()),
                 kernel: Err("n/a".to_owned()),
@@ -2133,6 +2140,7 @@ mod tests {
                 app.set_pacman(PacmanView {
                     upgrades: Ok(Vec::new()),
                     repo_source: RepoSource::LocalDatabase,
+                    snapshot_tool: None,
                     aur: Vec::new(),
                     orphans: Ok(vec![evil.to_owned()]),
                     kernel: Ok(KernelView {
@@ -2187,6 +2195,7 @@ mod tests {
         app.set_pacman(PacmanView {
             upgrades: Ok(Vec::new()),
             repo_source: RepoSource::LocalDatabase,
+            snapshot_tool: None,
             aur: Vec::new(),
             orphans: Ok(Vec::new()),
             kernel: Ok(KernelView {
