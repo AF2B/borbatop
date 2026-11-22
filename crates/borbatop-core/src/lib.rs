@@ -13,15 +13,17 @@ mod identity;
 mod io_stats;
 mod json;
 mod memory;
+mod news;
 mod proc_detail;
 mod process;
 mod services;
 mod sockets;
 mod startup;
+mod timestamps;
 mod tree;
 
 pub use bytes::{Bytes, PageSize, ZeroPageSize};
-pub use clock::UtcDateTime;
+pub use clock::{UtcDateTime, unix_from_civil};
 pub use containers::{ContainerInfo, container_id_of_unit, parse_container_list, same_container};
 pub use cpu::{
     CpuSnapshot, CpuStatError, CpuTicks, CpuTimes, ElapsedTicks, Permille, SampleError, SamplePair,
@@ -39,6 +41,7 @@ pub use memory::{
     LoadAvg, MemField, MemInfo, MemInfoError, MilliCelsius, Pressure, PressureLine, ProcTextError,
     parse_loadavg, parse_meminfo, parse_millicelsius, parse_pressure, parse_uptime,
 };
+pub use news::{NewsFeed, NewsItem, is_low_on_space, last_full_upgrade, parse_news_feed};
 pub use proc_detail::{FdKind, Limit, classify_fd_target, parse_limits, status_size};
 pub use process::{
     Nice, Pages, Pid, ProcessId, ProcessSample, ProcessState, StartTime, StatField, StatParseError,
@@ -54,4 +57,5 @@ pub use sockets::{
     parse_socket_table,
 };
 pub use startup::{StartupBlame, UnitStartup, parse_startup_blame, parse_systemd_duration};
+pub use timestamps::{parse_log_timestamp, parse_rfc822};
 pub use tree::{History, TreeRow, order_as_tree};
