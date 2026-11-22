@@ -215,7 +215,7 @@ impl Dialog {
             if let Some(tool) = &view.snapshot_tool {
                 options.push((
                     format!(
-                        "official repositories · {} pending · snapshot first ({tool}), then update everything",
+                        "snapshot ({tool}), then update repositories ({} pending)",
                         upgrades.len()
                     ),
                     UpdateChoice::Run(UpdatePlan::RepositoriesAfterSnapshot { tool: tool.clone() }),
@@ -223,7 +223,7 @@ impl Dialog {
             }
             options.push((
                 format!(
-                    "official repositories · {} pending · update everything (sudo pacman -Syu)",
+                    "update repositories ({} pending): sudo pacman -Syu",
                     upgrades.len()
                 ),
                 UpdateChoice::Run(UpdatePlan::Repositories),
