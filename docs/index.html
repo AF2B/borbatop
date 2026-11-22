@@ -305,7 +305,9 @@ footer i { color: var(--status-ok); font-style: normal; }
       <div class="key"><kbd>a</kbd><span>ação no serviço ou no container selecionado (iniciar, parar, reiniciar, remover)</span></div>
       <div class="key"><kbd>R</kbd><span>refazer o relatório da aba atual</span></div>
       <div class="key"><kbd>e</kbd><span>exportar a aba atual para JSON, com o filtro e a ordem que você vê</span></div>
-      <div class="key"><kbd>u</kbd><span>aba Pacman: escolher o que atualizar (repositórios, yay, paru)</span></div>
+      <div class="key"><kbd>u</kbd><span>aba Pacman: escolher o que atualizar (repositórios, yay, paru; com snapshot antes, se houver snapper ou timeshift)</span></div>
+      <div class="key"><kbd>D</kbd><span>aba Pacman: Update Doctor, o que saber antes e depois de atualizar</span></div>
+      <div class="key"><kbd>s d p x</kbd><span>aba Pacman: snapshot, diff dos .pacnew, merge com pacdiff, reiniciar serviços com biblioteca trocada</span></div>
       <div class="key"><kbd>l</kbd><span>logs da unidade (Serviços) ou do container (Containers)</span></div>
       <div class="key"><kbd>← →</kbd><span>amostra anterior / seguinte em um replay</span></div>
       <div class="key"><kbd>mouse</kbd><span>clique em aba, título de coluna ou linha; roda move a seleção</span></div>
@@ -365,6 +367,7 @@ $ borbatop --no-mouse                   <span style="color:var(--grey)"># deixa 
         <div class="label">pacman · libalpm</div>
         <h3>Quem é dono deste binário?</h3>
         <p>Coluna PKG: o equivalente a <code>pacman -Qo</code> para cada executável em execução. Aba Pacman: updates pendentes (via <code>checkupdates</code> quando existe, e do AUR para cada <code>yay</code> ou <code>paru</code> instalado), com <code>u</code> para atualizar; órfãos (<code>-Qdtq</code>), <code>.pacnew</code>/<code>.pacsave</code> esquecidos.</p>
+        <p><strong>Update Doctor</strong> (<code>D</code>): notícias do Arch desde o último upgrade completo (as que pedem passo manual vêm marcadas), espaço em <code>/</code> e no cache, snapshot opcional antes de atualizar e o checklist de depois: reinício, serviços, <code>.pacnew</code>. Rollback nunca é automático.</p>
       </div>
       <div class="card">
         <div class="label">Pós-upgrade</div>
