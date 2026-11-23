@@ -36,6 +36,7 @@ The top of the screen always shows per-core CPU, memory, swap, pressure stall (P
 | Services | systemd units, failures first; journal; start, stop, restart | Services tab (`2`), `l`, `a` |
 | Pacman | Pending upgrades, orphans, kernel versus installed, `.pacnew`, stale libraries | Pacman tab (`3`) |
 | Package updates | Whole-repository upgrade, AUR per helper (`yay`, `paru`), on the real terminal | `u` on the Pacman tab |
+| Update Doctor | Arch news since the last upgrade, disk space, snapshot before updating, `.pacnew` diff and merge, service restarts | `D`, `s`, `d`, `p`, `x` on the Pacman tab |
 | Network and disk | Throughput per interface and disk, filesystem fill | Network · Disk tab (`4`) |
 | Connections | Every TCP and UDP socket with its owning process | Connections tab (`5`) |
 | Boot | Startup summary and slowest units | Boot tab (`6`) |
